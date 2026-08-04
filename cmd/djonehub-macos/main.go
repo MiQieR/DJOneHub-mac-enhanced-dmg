@@ -126,6 +126,8 @@ type app struct {
 	force4GOff          bool
 	disabled4GServices  []string
 	networkPolicyPath   string
+
+	networkRepairMu sync.Mutex
 }
 
 type usbInterfaceStatus struct {
@@ -251,6 +253,7 @@ func main() {
 				defer usbATDevice.Close()
 				log.Printf("USB AT bridge opened on DJI %s", usbATDevice.Description())
 				instance.initUSBATESIMManager()
+				instance.ensureCellularDHCP()
 			}
 			log.Printf("modem discovery skipped: %v", err)
 			go instance.startSMSPoller(context.Background())
@@ -703,6 +706,7 @@ func (a *app) ensureUSBAT() error {
 	// The first open may fail while USB is re-enumerating. When a later poll
 	// succeeds, rebuild the eSIM service that startup could not create.
 	a.initUSBATESIMManager()
+	a.ensureCellularDHCP()
 	return nil
 }
 
@@ -1649,6 +1653,52 @@ func renewMacNetworkServiceDHCP(name string) error {
 		return fmt.Errorf("%s: %s", name, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// ensureCellularDHCP renews DHCP on the DJI cellular network service when its
+// USB network interface has no usable IPv4 address. It runs after the USB AT
+// bridge reopens so a re-enumerated module regains its 4G fallback route
+// without user interaction.
+func (a *app) ensureCellularDHCP() {
+	if a.demo || a.modem != nil {
+		return
+	}
+	a.networkRepairMu.Lock()
+	defer a.networkRepairMu.Unlock()
+
+	services, err := discoverMacNetworkServices()
+	if err != nil {
+		log.Printf("cellular DHCP repair: %v", err)
+		return
+	}
+	var target string
+	for _, service := range services {
+		if isDJICellularService(service) && !service.Disabled {
+			target = service.Name
+			break
+		}
+	}
+	if target == "" {
+		log.Printf("cellular DHCP repair: no enabled DJI cellular network service")
+		return
+	}
+	if info, err := readMacIPv4ServiceInfo(target); err == nil {
+		log.Printf("cellular DHCP repair: %s already has IPv4 %s", target, info.Address)
+		return
+	}
+	const attempts = 2
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := renewMacNetworkServiceDHCP(target); err != nil {
+			log.Printf("cellular DHCP repair: renew DHCP for %s failed: %v", target, err)
+			return
+		}
+		info, waitErr := waitForMacIPv4Service(target, 15*time.Second)
+		if waitErr == nil {
+			log.Printf("cellular DHCP repair: %s -> %s", target, info.Address)
+			return
+		}
+		log.Printf("cellular DHCP repair: attempt %d/2: %v", attempt, waitErr)
+	}
 }
 
 type macIPv4ServiceInfo struct {

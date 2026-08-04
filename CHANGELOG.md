@@ -1,5 +1,21 @@
 # 更新记录
 
+## 2026-08-01 · v0.1.5-preview（4G 自动联网修复）
+
+- 新增“模块重连后自动续租 DHCP”：模块 USB 重连、AT 桥重新打开后，自动检查 4G 网卡（Baiwang）是否获得有效 IPv4 地址；没有则自动执行 `networksetup -setdhcp` 续租并等待，最多 30 秒，无需手动重启模块。
+- 修复场景：模块掉线重连后 USB 网卡 `en8` 链路恢复但 DHCP 无响应，导致 Wi-Fi 断开时无法自动切换 4G 上网。
+- 旧版本均保留：v0.1.4-preview（Windows 实验版）、v0.1.3-preview（macOS 通用）、v0.1.2 / v0.1.1-preview（macOS arm64）。
+
+
+## 2026-08-01 · v0.1.4-preview（Windows 实验版）
+
+- 新增 Windows 版可执行文件 `DJOneHub-Windows-amd64-v0.1.4-preview.exe`：amd64 单文件，Web 管理界面已内嵌，解压后直接运行，无需安装。
+- 通过串口（虚拟 COM 口）连接的 DJI 4G 模块功能可用：短信、GPS、来电提醒、网络信息、Web 管理面板。
+- **已知限制**：USB 直连 AT 桥依赖 macOS + libusb，Windows 上不可用，eSIM 管理与 USB AT 通道受限。
+- **风险提示**：Windows 版为实验性构建，仅在 macOS 上交叉编译验证，未在真实 Windows + 模块环境实测，可能出现问题，请谨慎下载使用。
+- 旧版 macOS 安装包（v0.1.1 / v0.1.2 / v0.1.3）均保留，未覆盖。
+
+
 ## 2026-07-31 · v0.1.3-preview（支持 Intel Mac，通用安装包）
 
 - 新增通用（universal）安装包 `DJOneHub-macOS-universal-v0.1.3-preview.dmg`：一个安装包同时支持 Apple Silicon（M 系列）与 Intel（x86_64）Mac，macOS 13 及以上。

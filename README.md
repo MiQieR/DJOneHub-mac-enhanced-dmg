@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > 📦 **标准应用安装包已上传**：[Releases](https://github.com/MiQieR/DJOneHub-mac-enhanced/releases) 提供标准 macOS DMG 安装包，双击打开后拖拽 `DJOneHub.app` 到 `Applications` 目录即可完成安装：
-> - `DJOneHub-macOS-universal-v0.1.3-preview.dmg`：支持 Apple Silicon 与 Intel Mac 通用双架构
+> - `DJOneHub-macOS-universal-v0.1.5-preview.dmg`：基于上游 v0.1.5，支持 Apple Silicon 与 Intel Mac 通用双架构，新增 4G 网卡 DHCP 自动续租（模块重连后自动恢复 4G 自动联网）
 >
 > 更新内容见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -57,6 +57,7 @@
 | AT 调试 | 已实现 | 在网页中直接向模块发送 AT 指令 |
 | 深浅色外观 | 已实现 | 支持浅色、深色和跟随系统 |
 | Intel Mac | 实验支持 | universal 安装包已提供 arm64 + x86_64 双架构；未在真实 Intel 机型实测，谨慎使用 |
+| Windows | 实验支持 | 提供 amd64 单文件 exe；USB 直连 AT/eSIM 依赖 macOS 不可用，需通过串口连接模块；未在真实 Windows 环境实测，谨慎使用 |
 
 ## 改造实现说明
 
@@ -130,7 +131,9 @@
 
 请前往项目的 **Releases** 页面下载安装包：
 
-- `DJOneHub-macOS-universal-v0.1.3-preview.dmg`：支持 Apple Silicon（M 系列）与 Intel Mac 的标准 macOS 应用安装盘。
+- `DJOneHub-macOS-universal-v0.1.5-preview.dmg`：基于上游 v0.1.5，支持 Apple Silicon（M 系列）与 Intel Mac 的标准 macOS 应用安装盘，新增 4G 网卡 DHCP 自动续租。
+
+Release 页面还会提供同名的 `.sha256` 文件。它不是程序的一部分，也不是安装必需文件，仅用于确认 DMG 是否下载完整、是否与发布者生成的文件一致。
 
 ## 安装
 
