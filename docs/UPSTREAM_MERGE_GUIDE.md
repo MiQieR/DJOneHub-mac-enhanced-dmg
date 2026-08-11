@@ -56,7 +56,7 @@ git merge upstream/main --no-edit
 
 ```markdown
 > [!IMPORTANT]
-> 📦 **标准应用安装包已上传**：[Releases](https://github.com/MiQieR/DJOneHub-mac-enhanced/releases) 提供标准 macOS DMG 安装包，双击打开后拖拽 `DJOneHub.app` 到 `Applications` 目录即可完成安装：
+> 📦 **标准应用安装包已上传**：[Releases](https://github.com/rogerbush007-a11y/DJOneHub-mac-enhanced/releases) 提供标准 macOS DMG 安装包，双击打开后拖拽 `DJOneHub.app` 到 `Applications` 目录即可完成安装：
 > - `DJOneHub-macOS-universal-v<新版本>.dmg`：基于上游 v<新版本>，支持 Apple Silicon 与 Intel Mac 通用双架构；<简要列出新版本新增特性>
 ```
 

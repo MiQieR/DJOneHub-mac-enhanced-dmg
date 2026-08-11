@@ -3,7 +3,7 @@
 这是在 [DJOneHub](https://github.com/ZenGeekLabs/DJOneHub) 基础上做的 macOS 改造版。原项目解决了大疆第一代 4G 模块在 Mac 上的短信、eSIM 与 USB 4G 上网；这一版把重点放在“模块长期插在 Mac 上时，能不能像一张真正的电话卡一样被看见”。
 
 > [!IMPORTANT]
-> 📦 **标准应用安装包已上传**：[Releases](https://github.com/MiQieR/DJOneHub-mac-enhanced/releases) 提供标准 macOS DMG 安装包，双击打开后拖拽 `DJOneHub.app` 到 `Applications` 目录即可完成安装：
+> 📦 **标准应用安装包已上传**：[Releases](https://github.com/rogerbush007-a11y/DJOneHub-mac-enhanced/releases) 提供标准 macOS DMG 安装包，双击打开后拖拽 `DJOneHub.app` 到 `Applications` 目录即可完成安装：
 > - `DJOneHub-macOS-universal-v0.1.7-preview.dmg`：基于上游 v0.1.7，支持 Apple Silicon 与 Intel Mac 通用双架构；包含信号自检与自动找回、4G 网卡 DHCP 自动续租、自动创建/启用 4G 网卡服务（新电脑可直接获得 IPv4）
 >
 > 更新内容见 [CHANGELOG.md](CHANGELOG.md)。
