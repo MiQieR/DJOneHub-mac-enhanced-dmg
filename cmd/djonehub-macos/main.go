@@ -128,6 +128,12 @@ type app struct {
 	networkPolicyPath   string
 
 	networkRepairMu sync.Mutex
+
+	usbATOpenMu      sync.Mutex
+	recoveryMu       sync.Mutex
+	lostSignalCount  int
+	lastModemReboot  time.Time
+	lastNetworkCheck time.Time
 }
 
 type usbInterfaceStatus struct {
@@ -173,6 +179,7 @@ type macNetInterface struct {
 	Name   string `json:"name"`
 	Status string `json:"status"`
 	IPv4   string `json:"ipv4"`
+	MAC    string `json:"mac,omitempty"`
 	Kind   string `json:"kind"`
 }
 
@@ -259,6 +266,7 @@ func main() {
 			go instance.startSMSPoller(context.Background())
 			go instance.startCallPoller(context.Background())
 			go instance.startGPSPoller(context.Background())
+			go instance.startSignalRecovery(context.Background())
 			go instance.syncGPSState()
 			serve(instance, listen)
 			return
@@ -693,8 +701,22 @@ func (a *app) ensureUSBAT() error {
 		}
 		return errors.New("USB AT is cooling down after disconnect")
 	}
-	dev, err := openDJIUSBAT()
+
+	// Serialize opens: a stuck libusb open must not freeze every caller.
+	a.usbATOpenMu.Lock()
+	defer a.usbATOpenMu.Unlock()
+	if a.usbAT != nil {
+		return nil
+	}
+
+	dev, err := a.openUSBATWithTimeout()
 	if err != nil {
+		if strings.Contains(err.Error(), "open timed out") {
+			// The stuck libusb call keeps running in the background; back off
+			// so retries do not pile up while the module USB is unstable.
+			a.usbATBackoffUntil = time.Now().Add(30 * time.Second)
+			a.usbATBackoffErr = err.Error()
+		}
 		return err
 	}
 	a.usbAT = dev
@@ -708,6 +730,36 @@ func (a *app) ensureUSBAT() error {
 	a.initUSBATESIMManager()
 	a.ensureCellularDHCP()
 	return nil
+}
+
+const usbATOpenTimeout = 12 * time.Second
+
+// openUSBATWithTimeout opens the USB AT bridge but never blocks the caller for
+// longer than usbATOpenTimeout. libusb open/claim calls cannot be cancelled,
+// so a slow attempt is abandoned and reaped in the background to avoid leaking
+// a claimed interface when it finally completes.
+func (a *app) openUSBATWithTimeout() (*usbAT, error) {
+	type openResult struct {
+		dev *usbAT
+		err error
+	}
+	done := make(chan openResult, 1)
+	go func() {
+		dev, err := openDJIUSBAT()
+		done <- openResult{dev: dev, err: err}
+	}()
+	select {
+	case res := <-done:
+		return res.dev, res.err
+	case <-time.After(usbATOpenTimeout):
+		go func() {
+			res := <-done
+			if res.dev != nil {
+				res.dev.Close()
+			}
+		}()
+		return nil, errors.New("USB AT open timed out after 12s; the module USB may be unstable")
+	}
 }
 
 func (a *app) resetUSBATIfGone(err error) {
@@ -741,6 +793,102 @@ func (a *app) markUSBATDetached(reason string) {
 	a.callMu.Unlock()
 	if manager, _ := a.currentESIMManager(); manager != nil {
 		manager.NotifyModemReset()
+	}
+}
+
+// startSignalRecovery runs a self-check loop that keeps the USB AT bridge
+// open, watches cellular registration, and escalates through gentle recovery
+// steps when the module loses the network for a sustained period.
+func (a *app) startSignalRecovery(ctx context.Context) {
+	const checkInterval = 8 * time.Second
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.signalRecoveryOnce()
+		}
+	}
+}
+
+func (a *app) signalRecoveryOnce() {
+	if a.demo || a.modem != nil {
+		return
+	}
+	if err := a.ensureUSBAT(); err != nil {
+		return
+	}
+	if a.usbAT == nil {
+		return
+	}
+
+	reg, signal, err := a.probeCellularHealth()
+	if err != nil {
+		// The USB AT channel itself broke; let the next cycle re-open it.
+		a.resetUSBATIfGone(err)
+		return
+	}
+	if reg == 1 || reg == 5 {
+		if a.lostSignalCount > 0 {
+			log.Printf("cellular signal recovered: registration=%d signal=%d dBm", reg, signal)
+		}
+		a.lostSignalCount = 0
+	} else {
+		a.lostSignalCount++
+		log.Printf("cellular signal lost %d/3 checks: registration=%d signal=%d dBm", a.lostSignalCount, reg, signal)
+		if a.lostSignalCount >= 3 {
+			a.recoverSignal()
+		}
+	}
+
+	// The USB network interface rarely drops by itself, so only re-check
+	// DHCP every minute to avoid hammering networksetup.
+	if time.Since(a.lastNetworkCheck) >= 60*time.Second {
+		a.lastNetworkCheck = time.Now()
+		a.ensureCellularDHCP()
+	}
+}
+
+// probeCellularHealth cheaply reads registration and signal without running
+// the full status command set.
+func (a *app) probeCellularHealth() (reg int, signalDBM int, err error) {
+	cregResp, err := a.usbAT.Command("AT+CREG?", 3*time.Second)
+	if err != nil {
+		return 0, 0, err
+	}
+	ceregResp, _ := a.usbAT.Command("AT+CEREG?", 3*time.Second)
+	csqResp, _ := a.usbAT.Command("AT+CSQ", 3*time.Second)
+	return firstNonZeroRegistration(cregResp, ceregResp), parseUSBATCSQDBM(csqResp), nil
+}
+
+// recoverSignal escalates step by step after the module has been without a
+// network for several consecutive checks: re-attach, radio cycle, and finally
+// a throttled full module reboot.
+func (a *app) recoverSignal() {
+	a.recoveryMu.Lock()
+	defer a.recoveryMu.Unlock()
+	if a.usbAT == nil {
+		return
+	}
+	switch {
+	case a.lostSignalCount == 3:
+		log.Printf("cellular signal recovery: forcing PS attach and automatic network selection")
+		_, _ = a.usbAT.Command("AT+CGATT=1", 5*time.Second)
+		_, _ = a.usbAT.Command("AT+COPS=0", 5*time.Second)
+	case a.lostSignalCount == 6:
+		log.Printf("cellular signal recovery: cycling radio (AT+CFUN=0 then 1)")
+		_, _ = a.usbAT.Command("AT+CFUN=0", 5*time.Second)
+		time.Sleep(3 * time.Second)
+		if a.usbAT != nil {
+			_, _ = a.usbAT.Command("AT+CFUN=1", 10*time.Second)
+		}
+	case a.lostSignalCount >= 9 && time.Since(a.lastModemReboot) >= 10*time.Minute:
+		a.lastModemReboot = time.Now()
+		log.Printf("cellular signal recovery: rebooting module (AT+CFUN=1,1)")
+		_, _ = a.usbAT.Command("AT+CFUN=1,1", 3*time.Second)
+		a.markUSBATDetached("cellular signal recovery reboot")
 	}
 }
 
@@ -1631,8 +1779,10 @@ func parseMacNetworkServices(output string) []macNetworkService {
 }
 
 func isDJICellularService(service macNetworkService) bool {
-	return strings.EqualFold(strings.TrimSpace(service.HardwarePort), "Baiwang") &&
-		regexp.MustCompile(`^en\d+$`).MatchString(service.Device)
+	port := strings.ToLower(strings.TrimSpace(service.HardwarePort))
+	name := strings.ToLower(strings.TrimSpace(service.Name))
+	matchesBaiwang := strings.Contains(port, "baiwang") || strings.Contains(name, "baiwang")
+	return matchesBaiwang && regexp.MustCompile(`^en\d+$`).MatchString(service.Device)
 }
 
 func setMacNetworkServiceEnabled(name string, enabled bool) error {
@@ -1671,19 +1821,42 @@ func (a *app) ensureCellularDHCP() {
 		log.Printf("cellular DHCP repair: %v", err)
 		return
 	}
+	// Find the DJI cellular network service. macOS may name it differently on
+	// a fresh machine ("Baiwang", "Baiwang 2", localized variants), and it may
+	// also be disabled, in which case DHCP renewals never apply.
 	var target string
 	for _, service := range services {
-		if isDJICellularService(service) && !service.Disabled {
-			target = service.Name
-			break
+		if !isDJICellularService(service) {
+			continue
 		}
+		if service.Disabled {
+			log.Printf("cellular DHCP repair: enabling disabled DJI cellular service %s", service.Name)
+			if err := setMacNetworkServiceEnabled(service.Name, true); err != nil {
+				log.Printf("cellular DHCP repair: enable %s failed: %v", service.Name, err)
+				continue
+			}
+		}
+		target = service.Name
+		break
 	}
+	// No service yet: on a machine that never saw this module, macOS may not
+	// have created a network service for the modem's USB adapter. Create one
+	// so DHCP can be renewed automatically.
 	if target == "" {
-		log.Printf("cellular DHCP repair: no enabled DJI cellular network service")
-		return
+		device := findUnprovisionedUSBModemInterface(services)
+		if device == "" {
+			log.Printf("cellular DHCP repair: no DJI cellular network service and no unprovisioned USB interface")
+			return
+		}
+		var err error
+		target, err = createCellularNetworkService(device)
+		if err != nil {
+			log.Printf("cellular DHCP repair: create network service on %s failed: %v", device, err)
+			return
+		}
+		log.Printf("cellular DHCP repair: created network service %s on %s", target, device)
 	}
-	if info, err := readMacIPv4ServiceInfo(target); err == nil {
-		log.Printf("cellular DHCP repair: %s already has IPv4 %s", target, info.Address)
+	if _, err := readMacIPv4ServiceInfo(target); err == nil {
 		return
 	}
 	const attempts = 2
@@ -1699,6 +1872,69 @@ func (a *app) ensureCellularDHCP() {
 		}
 		log.Printf("cellular DHCP repair: attempt %d/2: %v", attempt, waitErr)
 	}
+	// DHCP keeps failing: report the modem USB networking mode so a fresh
+	// machine can be diagnosed (usbnet=0 means the adapter never comes up).
+	if a.usbAT != nil {
+		if resp, err := a.usbAT.Command(`AT+QCFG="usbnet"`, 3*time.Second); err == nil {
+			log.Printf("cellular DHCP repair: AT+QCFG usbnet => %s", strings.TrimSpace(resp))
+		}
+	}
+}
+
+// findUnprovisionedUSBModemInterface returns the en* interface that looks like
+// the DJI modem's USB network adapter but has no macOS network service yet.
+// USB cellular adapters typically use a locally administered (randomized) MAC
+// address rather than a burned-in vendor OUI, which distinguishes them from
+// built-in Ethernet and Wi-Fi.
+func findUnprovisionedUSBModemInterface(services []macNetworkService) string {
+	return selectUnprovisionedUSBInterface(discoverMacNetworkInterfaces(), services)
+}
+
+func selectUnprovisionedUSBInterface(interfaces []macNetInterface, services []macNetworkService) string {
+	hasService := make(map[string]bool)
+	for _, service := range services {
+		hasService[service.Device] = true
+	}
+	for _, item := range interfaces {
+		if item.Kind != "ethernet" || item.Name == "en0" || !isLocallyAdministeredMAC(item.MAC) {
+			continue
+		}
+		if !hasService[item.Name] {
+			return item.Name
+		}
+	}
+	return ""
+}
+
+func isLocallyAdministeredMAC(mac string) bool {
+	clean := strings.ReplaceAll(strings.TrimSpace(mac), "-", ":")
+	parts := strings.Split(clean, ":")
+	if len(parts) == 0 {
+		return false
+	}
+	first, err := strconv.ParseUint(parts[0], 16, 8)
+	if err != nil {
+		return false
+	}
+	return first&0x02 != 0
+}
+
+func createCellularNetworkService(device string) (string, error) {
+	for _, name := range []string{"Baiwang", "Baiwang 2", "DJI 4G"} {
+		if err := createMacNetworkService(name, device); err != nil {
+			continue
+		}
+		return name, nil
+	}
+	return "", fmt.Errorf("no available service name for %s", device)
+}
+
+func createMacNetworkService(name, device string) error {
+	out, err := exec.Command("/usr/sbin/networksetup", "-createnetworkservice", name, device).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s on %s: %s", name, device, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 type macIPv4ServiceInfo struct {
@@ -2057,6 +2293,12 @@ func discoverMacNetworkInterfaces() []macNetInterface {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "status:") {
 				item.Status = strings.TrimSpace(strings.TrimPrefix(line, "status:"))
+			}
+			if strings.HasPrefix(line, "ether ") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					item.MAC = fields[1]
+				}
 			}
 			if strings.HasPrefix(line, "inet ") {
 				fields := strings.Fields(line)

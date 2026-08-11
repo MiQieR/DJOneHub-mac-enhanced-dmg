@@ -61,6 +61,87 @@ func TestParseMacNetworkServices(t *testing.T) {
 	}
 }
 
+func TestIsDJICellularServiceRelaxed(t *testing.T) {
+	tests := []struct {
+		name    string
+		service macNetworkService
+		want    bool
+	}{
+		{
+			name:    "hardware port Baiwang",
+			service: macNetworkService{Name: "Baiwang 2", HardwarePort: "Baiwang", Device: "en8"},
+			want:    true,
+		},
+		{
+			name:    "service name contains baiwang",
+			service: macNetworkService{Name: "Baiwang", HardwarePort: "USB LAN", Device: "en6"},
+			want:    true,
+		},
+		{
+			name:    "mixed case",
+			service: macNetworkService{Name: "BAIWANG", HardwarePort: "baiwang", Device: "en10"},
+			want:    true,
+		},
+		{
+			name:    "not a cellular service",
+			service: macNetworkService{Name: "Wi-Fi", HardwarePort: "Wi-Fi", Device: "en0"},
+			want:    false,
+		},
+		{
+			name:    "baiwang without en device",
+			service: macNetworkService{Name: "Baiwang", HardwarePort: "Baiwang", Device: "bridge0"},
+			want:    false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isDJICellularService(tt.service); got != tt.want {
+				t.Fatalf("isDJICellularService(%+v) = %v, want %v", tt.service, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsLocallyAdministeredMAC(t *testing.T) {
+	tests := []struct {
+		mac  string
+		want bool
+	}{
+		{mac: "3e:cc:eb:30:27:93", want: true},
+		{mac: "02:00:00:00:00:01", want: true},
+		{mac: "3e-cc-eb-30-27-93", want: true},
+		{mac: "00:1a:2b:3c:4d:5e", want: false},
+		{mac: "ac:de:48:00:11:22", want: false},
+		{mac: "", want: false},
+		{mac: "not-a-mac", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.mac, func(t *testing.T) {
+			if got := isLocallyAdministeredMAC(tt.mac); got != tt.want {
+				t.Fatalf("isLocallyAdministeredMAC(%q) = %v, want %v", tt.mac, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSelectUnprovisionedUSBInterface(t *testing.T) {
+	interfaces := []macNetInterface{
+		{Name: "en0", Kind: "ethernet", MAC: "ac:de:48:00:11:22"},
+		{Name: "en8", Kind: "ethernet", MAC: "3e:cc:eb:30:27:93"},
+		{Name: "en10", Kind: "ethernet", MAC: "02:00:00:00:00:01"},
+		{Name: "awdl0", Kind: "apple-wireless", MAC: "3e:00:00:00:00:01"},
+	}
+	services := []macNetworkService{
+		{Name: "Baiwang 2", HardwarePort: "Baiwang", Device: "en8"},
+	}
+	if got := selectUnprovisionedUSBInterface(interfaces, services); got != "en10" {
+		t.Fatalf("selectUnprovisionedUSBInterface = %q, want en10 (en8 has a service, en0 built-in)", got)
+	}
+	if got := selectUnprovisionedUSBInterface(nil, services); got != "" {
+		t.Fatalf("selectUnprovisionedUSBInterface(nil) = %q, want empty", got)
+	}
+}
+
 func TestParseMacIPv4ServiceInfo(t *testing.T) {
 	info := parseMacIPv4ServiceInfo(`DHCP Configuration
 IP address: 192.168.225.29

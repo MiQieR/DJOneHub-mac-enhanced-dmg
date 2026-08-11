@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > 📦 **标准应用安装包已上传**：[Releases](https://github.com/MiQieR/DJOneHub-mac-enhanced/releases) 提供标准 macOS DMG 安装包，双击打开后拖拽 `DJOneHub.app` 到 `Applications` 目录即可完成安装：
-> - `DJOneHub-macOS-universal-v0.1.5-preview.dmg`：基于上游 v0.1.5，支持 Apple Silicon 与 Intel Mac 通用双架构，新增 4G 网卡 DHCP 自动续租（模块重连后自动恢复 4G 自动联网）
+> - `DJOneHub-macOS-universal-v0.1.7-preview.dmg`：基于上游 v0.1.7，支持 Apple Silicon 与 Intel Mac 通用双架构；包含信号自检与自动找回、4G 网卡 DHCP 自动续租、自动创建/启用 4G 网卡服务（新电脑可直接获得 IPv4）
 >
 > 更新内容见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -131,7 +131,7 @@
 
 请前往项目的 **Releases** 页面下载安装包：
 
-- `DJOneHub-macOS-universal-v0.1.5-preview.dmg`：基于上游 v0.1.5，支持 Apple Silicon（M 系列）与 Intel Mac 的标准 macOS 应用安装盘，新增 4G 网卡 DHCP 自动续租。
+- `DJOneHub-macOS-universal-v0.1.7-preview.dmg`：基于上游 v0.1.7，支持 Apple Silicon（M 系列）与 Intel Mac 的标准 macOS 应用安装盘；包含信号自检与自动找回、4G 网卡 DHCP 自动续租、自动创建/启用 4G 网卡服务（新电脑插入调试好的模块可直接获得 IPv4 上网）。
 
 Release 页面还会提供同名的 `.sha256` 文件。它不是程序的一部分，也不是安装必需文件，仅用于确认 DMG 是否下载完整、是否与发布者生成的文件一致。
 
