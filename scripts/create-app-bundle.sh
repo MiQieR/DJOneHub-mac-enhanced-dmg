@@ -74,7 +74,7 @@ EOF
       -I Sources/CModemBridge/include -I Sources/CUACProbe/include \
       Sources/DJOneHubNotifier/*.swift "${INTEL_ROOT}/ModemBridge.o" "${INTEL_ROOT}/CUACProbe.o" \
       -framework CoreAudio -framework CoreFoundation -framework IOKit -framework AVFoundation \
-      -framework AppKit -framework UserNotifications -framework Contacts \
+      -framework AppKit -framework UserNotifications -framework Contacts -framework ServiceManagement \
       -o "${INTEL_ROOT}/DJOneHubNotifier"
     cd "${ROOT_DIR}"
     rm -f "${BUILD_ROOT}/DJOneHubNotifier-universal"
