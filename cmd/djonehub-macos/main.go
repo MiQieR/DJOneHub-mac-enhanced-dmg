@@ -594,7 +594,24 @@ func portScore(port string) int {
 	return 0
 }
 
+var (
+	cachedUSBDevice   *usbDeviceStatus
+	cachedUSBDeviceAt time.Time
+	cachedUSBMu       sync.Mutex
+)
+
 func discoverDJIUSBDevice() *usbDeviceStatus {
+	cachedUSBMu.Lock()
+	defer cachedUSBMu.Unlock()
+	if time.Since(cachedUSBDeviceAt) < 1500*time.Millisecond {
+		return cachedUSBDevice
+	}
+	cachedUSBDevice = scanDJIUSBDeviceInternal()
+	cachedUSBDeviceAt = time.Now()
+	return cachedUSBDevice
+}
+
+func scanDJIUSBDeviceInternal() *usbDeviceStatus {
 	out, err := exec.Command("ioreg", "-r", "-c", "IOUSBHostInterface", "-l", "-w", "0").Output()
 	if err != nil {
 		return nil
@@ -948,7 +965,8 @@ func (a *app) resetUSBATIfGone(err error) {
 	text := strings.ToUpper(err.Error())
 	if !strings.Contains(text, "NO_DEVICE") &&
 		!strings.Contains(text, "NOT_FOUND") &&
-		!strings.Contains(text, "USB AT COMMAND TIMED OUT") {
+		!strings.Contains(text, "DEVICE_NOT_FOUND") &&
+		!strings.Contains(text, "LIBUSB_ERROR_NO_DEVICE") {
 		return
 	}
 	a.markUSBATDetached(err.Error())
@@ -1252,20 +1270,16 @@ func (a *app) currentUSBDevice() *usbDeviceStatus {
 }
 
 func (a *app) usbATStatus() (modem.DeviceStatus, error) {
-	firmwareResp, _ := a.usbAT.Command("ATI", 3*time.Second)
-	cpinResp, cpinErr := a.usbAT.Command("AT+CPIN?", 3*time.Second)
-	csqResp, _ := a.usbAT.Command("AT+CSQ", 3*time.Second)
-	ceregResp, _ := a.usbAT.Command("AT+CEREG?", 3*time.Second)
-	cregResp, _ := a.usbAT.Command("AT+CREG?", 3*time.Second)
-	copsResp, _ := a.usbAT.Command("AT+COPS?", 3*time.Second)
-	qccidResp, _ := a.usbAT.Command("AT+QCCID", 3*time.Second)
-	cimiResp, _ := a.usbAT.Command("AT+CIMI", 3*time.Second)
-	qnwinfoResp, _ := a.usbAT.Command("AT+QNWINFO", 3*time.Second)
-	usbnetResp, _ := a.usbAT.Command(`AT+QCFG="usbnet"`, 3*time.Second)
-
-	if cpinErr != nil {
-		return modem.DeviceStatus{}, cpinErr
-	}
+	firmwareResp, _ := a.usbAT.Command("ATI", 2*time.Second)
+	cpinResp, _ := a.usbAT.Command("AT+CPIN?", 2*time.Second)
+	csqResp, _ := a.usbAT.Command("AT+CSQ", 2*time.Second)
+	ceregResp, _ := a.usbAT.Command("AT+CEREG?", 2*time.Second)
+	cregResp, _ := a.usbAT.Command("AT+CREG?", 2*time.Second)
+	copsResp, _ := a.usbAT.Command("AT+COPS?", 2*time.Second)
+	qccidResp, _ := a.usbAT.Command("AT+QCCID", 2*time.Second)
+	cimiResp, _ := a.usbAT.Command("AT+CIMI", 2*time.Second)
+	qnwinfoResp, _ := a.usbAT.Command("AT+QNWINFO", 2*time.Second)
+	usbnetResp, _ := a.usbAT.Command(`AT+QCFG="usbnet"`, 2*time.Second)
 
 	regStatus := firstNonZeroRegistration(ceregResp, cregResp)
 	mode, duplex, band, channel := parseUSBATQNWInfo(qnwinfoResp)
@@ -1273,12 +1287,20 @@ func (a *app) usbATStatus() (modem.DeviceStatus, error) {
 	if parsedMode, err := strconv.Atoi(parseUSBNetMode(usbnetResp)); err == nil {
 		usbnetMode = parsedMode
 	}
+	upperCPIN := strings.ToUpper(cpinResp)
+	simInserted := strings.Contains(upperCPIN, "READY") || strings.Contains(upperCPIN, "PIN") || strings.Contains(upperCPIN, "PUK")
+
+	operatorName := modem.NormalizeServingOperatorName(parseUSBATOperator(copsResp), parseUSBATIMSI(cimiResp))
+	if operatorName == "" && strings.Contains(copsResp, "CHN-UNICOM") {
+		operatorName = "中国联通"
+	}
+
 	status := modem.DeviceStatus{
 		Firmware:      parseUSBATFirmware(firmwareResp),
 		ICCID:         parseUSBATPrefixed(qccidResp, "+QCCID:"),
 		IMSI:          parseUSBATIMSI(cimiResp),
-		Operator:      modem.NormalizeServingOperatorName(parseUSBATOperator(copsResp), parseUSBATIMSI(cimiResp)),
-		SimInserted:   strings.Contains(strings.ToUpper(cpinResp), "READY"),
+		Operator:      operatorName,
+		SimInserted:   simInserted,
 		SignalDBM:     parseUSBATCSQDBM(csqResp),
 		RegStatus:     regStatus,
 		RegStatusText: registrationText(regStatus),
@@ -1287,9 +1309,6 @@ func (a *app) usbATStatus() (modem.DeviceStatus, error) {
 		RadioBand:     band,
 		RadioChannel:  channel,
 		USBNetMode:    usbnetMode,
-	}
-	if status.Operator == "" && strings.Contains(copsResp, "CHN-UNICOM") {
-		status.Operator = "中国联通"
 	}
 	return status, nil
 }
@@ -2397,34 +2416,26 @@ func (a *app) applyCellularPolicyLocked() error {
 		// gateway. This is deliberately stronger than changing service priority:
 		// an automatic fallback may still select 4G, but it cannot send traffic
 		// through a route whose gateway is the interface itself.
-		var skipped []string
-		applied := 0
 		for _, service := range services {
-			if !isDJICellularService(service) || service.Disabled {
+			if !isDJICellularService(service) {
 				continue
 			}
 			info, err := readMacIPv4ServiceInfo(service.Name)
 			if err != nil {
-				skipped = append(skipped, err.Error())
-				continue
+				// 网卡尚未取得有效 IP 时，使用标准 QDC 子网虚拟地址屏蔽网关路由
+				info = macIPv4ServiceInfo{Address: "192.168.225.250", Subnet: "255.255.255.0"}
 			}
 			if err := blockMacNetworkServiceRoute(service.Name, info); err != nil {
-				skipped = append(skipped, err.Error())
-				continue
+				// 若设置手动路由失败，则直接尝试关闭该服务作为后备方案
+				_ = setMacNetworkServiceEnabled(service.Name, false)
 			}
 			a.disabled4GServices = appendUnique(a.disabled4GServices, service.Name)
-			applied++
-		}
-		if applied == 0 {
-			if len(skipped) == 0 {
-				return errors.New("未找到可用的 4G 网络服务")
-			}
-			return errors.New(strings.Join(skipped, "; "))
 		}
 		return a.persistNetworkPolicyLocked()
 	}
 	var restoreErrors []string
 	for _, name := range a.disabled4GServices {
+		_ = setMacNetworkServiceEnabled(name, true)
 		if err := renewMacNetworkServiceDHCP(name); err != nil {
 			log.Printf("restore DHCP for 4G network service %q: %v", name, err)
 			restoreErrors = append(restoreErrors, err.Error())

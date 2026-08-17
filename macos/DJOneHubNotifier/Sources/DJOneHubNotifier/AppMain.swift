@@ -400,7 +400,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         gpsStartupFramesRemaining = 8
         gpsAnimationFrame = 0
         renderGPSAnimationFrame()
-        gpsAnimationTimer = Timer.scheduledTimer(withTimeInterval: 0.32, repeats: true) { [weak self] _ in
+        gpsAnimationTimer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.renderGPSAnimationFrame()
             }

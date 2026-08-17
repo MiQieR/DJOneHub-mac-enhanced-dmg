@@ -36,7 +36,8 @@ final class CallCenter: ObservableObject {
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.pollOnce()
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                let interval: UInt64 = (self?.isOnline ?? true) ? 1_000_000_000 : 3_500_000_000
+                try? await Task.sleep(nanoseconds: interval)
             }
         }
     }
