@@ -450,12 +450,7 @@ struct MoreView: View {
         .task {
             await refreshAll()
             while !Task.isCancelled {
-                guard settings.autoRefreshEnabled else {
-                    try? await Task.sleep(nanoseconds: 3_000_000_000)
-                    continue
-                }
-                try? await Task.sleep(nanoseconds: settings.autoRefreshInterval.nanoseconds)
-                guard settings.autoRefreshEnabled, !Task.isCancelled else { continue }
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
                 if let p = try? await calls.apiClient.cellularPolicy() {
                     policy = p
                 }
@@ -881,7 +876,7 @@ struct DeviceStatusCard: View {
                     await sampleOnce()
                 }
                 .frame(maxWidth: 100)
-                Text(settings.autoRefreshEnabled ? L10n.f("每 %@ 秒自动更新", String(settings.autoRefreshInterval.rawValue)) : L10n.t("手动刷新模式"))
+                Text(L10n.t("每 3 秒自动更新"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -892,22 +887,28 @@ struct DeviceStatusCard: View {
         }
         .modifier(PhoneCard())
         .task {
-            await sampleOnce()
             while !Task.isCancelled {
-                guard settings.autoRefreshEnabled else {
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    continue
-                }
-                try? await Task.sleep(nanoseconds: settings.autoRefreshInterval.nanoseconds)
-                guard settings.autoRefreshEnabled, !Task.isCancelled else { continue }
                 await sampleOnce()
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
             }
         }
     }
 
     private func sampleOnce() async {
         if let modem = try? await calls.apiClient.modemStatus() {
-            status = modem
+            if modem.operatorName != nil || status == nil {
+                status = modem
+            } else if let prev = status {
+                status = ModemStatus(
+                    signalDBM: modem.signalDBM ?? prev.signalDBM,
+                    networkMode: modem.networkMode ?? prev.networkMode,
+                    operatorName: modem.operatorName ?? prev.operatorName,
+                    simInserted: modem.simInserted ?? prev.simInserted,
+                    regStatusText: modem.regStatusText ?? prev.regStatusText,
+                    imei: modem.imei ?? prev.imei,
+                    iccid: modem.iccid ?? prev.iccid
+                )
+            }
         }
         guard let current = try? await calls.apiClient.networkTraffic(), current.available else {
             previous = nil
@@ -1142,11 +1143,8 @@ struct GPSPanel: View {
             }
         }
         .task {
-            while !Task.isCancelled {
-                if let current = try? await calls.apiClient.gpsStatus() {
-                    gps = current
-                }
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            if let current = try? await calls.apiClient.gpsStatus() {
+                gps = current
             }
         }
     }

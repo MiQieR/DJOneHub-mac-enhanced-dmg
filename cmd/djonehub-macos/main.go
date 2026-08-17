@@ -89,6 +89,12 @@ type app struct {
 	usbATBackoffUntil time.Time
 	usbATBackoffErr   string
 
+	cachedModemMu       sync.Mutex
+	cachedModemFirmware string
+	cachedModemICCID    string
+	cachedModemIMSI     string
+	cachedModemUSBNet   int
+
 	smsMu          sync.RWMutex
 	smsOperationMu sync.Mutex
 	sms            []receivedSMS
@@ -989,6 +995,12 @@ func (a *app) markUSBATDetached(reason string) {
 	a.discoveryError = "DJI USB device is not connected"
 	a.usbATBackoffUntil = time.Now().Add(2 * time.Second)
 	a.usbATBackoffErr = reason
+	a.cachedModemMu.Lock()
+	a.cachedModemFirmware = ""
+	a.cachedModemICCID = ""
+	a.cachedModemIMSI = ""
+	a.cachedModemUSBNet = -1
+	a.cachedModemMu.Unlock()
 	// A module reboot or re-enumeration can change USBCFG outside this process.
 	// Do not keep reporting a previously cached "ready" state in that case.
 	a.invalidateReadyModuleSetup()
@@ -1276,35 +1288,53 @@ func (a *app) currentUSBDevice() *usbDeviceStatus {
 }
 
 func (a *app) usbATStatus() (modem.DeviceStatus, error) {
-	firmwareResp, _ := a.usbAT.Command("ATI", 2*time.Second)
-	cpinResp, _ := a.usbAT.Command("AT+CPIN?", 2*time.Second)
-	csqResp, _ := a.usbAT.Command("AT+CSQ", 2*time.Second)
-	ceregResp, _ := a.usbAT.Command("AT+CEREG?", 2*time.Second)
-	cregResp, _ := a.usbAT.Command("AT+CREG?", 2*time.Second)
-	copsResp, _ := a.usbAT.Command("AT+COPS?", 2*time.Second)
-	qccidResp, _ := a.usbAT.Command("AT+QCCID", 2*time.Second)
-	cimiResp, _ := a.usbAT.Command("AT+CIMI", 2*time.Second)
-	qnwinfoResp, _ := a.usbAT.Command("AT+QNWINFO", 2*time.Second)
-	usbnetResp, _ := a.usbAT.Command(`AT+QCFG="usbnet"`, 2*time.Second)
+	a.cachedModemMu.Lock()
+	if a.cachedModemFirmware == "" {
+		if fwResp, err := a.usbAT.Command("ATI", 1200*time.Millisecond); err == nil {
+			a.cachedModemFirmware = parseUSBATFirmware(fwResp)
+		}
+		if qccidResp, err := a.usbAT.Command("AT+QCCID", 1200*time.Millisecond); err == nil {
+			a.cachedModemICCID = parseUSBATPrefixed(qccidResp, "+QCCID:")
+		}
+		if cimiResp, err := a.usbAT.Command("AT+CIMI", 1200*time.Millisecond); err == nil {
+			a.cachedModemIMSI = parseUSBATIMSI(cimiResp)
+		}
+		if usbnetResp, err := a.usbAT.Command(`AT+QCFG="usbnet"`, 1200*time.Millisecond); err == nil {
+			if parsedMode, err := strconv.Atoi(parseUSBNetMode(usbnetResp)); err == nil {
+				a.cachedModemUSBNet = parsedMode
+			}
+		}
+	}
+	cachedFirmware := a.cachedModemFirmware
+	cachedICCID := a.cachedModemICCID
+	cachedIMSI := a.cachedModemIMSI
+	cachedUSBNet := a.cachedModemUSBNet
+	a.cachedModemMu.Unlock()
+
+	cpinResp, _ := a.usbAT.Command("AT+CPIN?", 1000*time.Millisecond)
+	csqResp, _ := a.usbAT.Command("AT+CSQ", 1000*time.Millisecond)
+	ceregResp, _ := a.usbAT.Command("AT+CEREG?", 1000*time.Millisecond)
+	cregResp, _ := a.usbAT.Command("AT+CREG?", 1000*time.Millisecond)
+	copsResp, _ := a.usbAT.Command("AT+COPS?", 1000*time.Millisecond)
+	qnwinfoResp, _ := a.usbAT.Command("AT+QNWINFO", 1000*time.Millisecond)
 
 	regStatus := firstNonZeroRegistration(ceregResp, cregResp)
 	mode, duplex, band, channel := parseUSBATQNWInfo(qnwinfoResp)
-	usbnetMode := -1
-	if parsedMode, err := strconv.Atoi(parseUSBNetMode(usbnetResp)); err == nil {
-		usbnetMode = parsedMode
-	}
 	upperCPIN := strings.ToUpper(cpinResp)
 	simInserted := strings.Contains(upperCPIN, "READY") || strings.Contains(upperCPIN, "PIN") || strings.Contains(upperCPIN, "PUK")
 
-	operatorName := modem.NormalizeServingOperatorName(parseUSBATOperator(copsResp), parseUSBATIMSI(cimiResp))
+	operatorName := modem.NormalizeServingOperatorName(parseUSBATOperator(copsResp), cachedIMSI)
 	if operatorName == "" && strings.Contains(copsResp, "CHN-UNICOM") {
 		operatorName = "中国联通"
 	}
+	if operatorName == "" && cachedIMSI != "" {
+		operatorName = modem.NormalizeServingOperatorName("", cachedIMSI)
+	}
 
 	status := modem.DeviceStatus{
-		Firmware:      parseUSBATFirmware(firmwareResp),
-		ICCID:         parseUSBATPrefixed(qccidResp, "+QCCID:"),
-		IMSI:          parseUSBATIMSI(cimiResp),
+		Firmware:      cachedFirmware,
+		ICCID:         cachedICCID,
+		IMSI:          cachedIMSI,
 		Operator:      operatorName,
 		SimInserted:   simInserted,
 		SignalDBM:     parseUSBATCSQDBM(csqResp),
@@ -1314,7 +1344,7 @@ func (a *app) usbATStatus() (modem.DeviceStatus, error) {
 		NetworkDuplex: duplex,
 		RadioBand:     band,
 		RadioChannel:  channel,
-		USBNetMode:    usbnetMode,
+		USBNetMode:    cachedUSBNet,
 	}
 	return status, nil
 }
@@ -1959,6 +1989,25 @@ func (a *app) networkDiagnostic(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, diag)
 }
 
+var (
+	cachedTrafficIfName string
+	cachedTrafficIfAt   time.Time
+	cachedTrafficIfMu   sync.Mutex
+)
+
+func (a *app) selectTrafficInterfaceCached() string {
+	cachedTrafficIfMu.Lock()
+	defer cachedTrafficIfMu.Unlock()
+	if time.Since(cachedTrafficIfAt) < 8*time.Second && cachedTrafficIfName != "" {
+		return cachedTrafficIfName
+	}
+	interfaces := discoverMacNetworkInterfaces()
+	name := selectUSBTrafficInterface(interfaces, discoverMacDefaultRoute())
+	cachedTrafficIfName = name
+	cachedTrafficIfAt = time.Now()
+	return name
+}
+
 func (a *app) networkTraffic(w http.ResponseWriter, _ *http.Request) {
 	snapshot := networkTrafficSnapshot{
 		SampledAtMS: time.Now().UnixMilli(),
@@ -1969,8 +2018,7 @@ func (a *app) networkTraffic(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	interfaces := discoverMacNetworkInterfaces()
-	name := selectUSBTrafficInterface(interfaces, discoverMacDefaultRoute())
+	name := a.selectTrafficInterfaceCached()
 	if name == "" {
 		writeJSON(w, http.StatusOK, snapshot)
 		return
@@ -2507,22 +2555,46 @@ func (a *app) setCellularPolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) startCellularPolicyGuard(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 	for {
-		a.networkPolicyMu.Lock()
-		if err := a.loadNetworkPolicyLocked(); err != nil {
-			log.Printf("load cellular policy: %v", err)
-		} else if a.force4GOff {
-			if err := a.applyCellularPolicyLocked(); err != nil {
-				log.Printf("enforce cellular force-off policy: %v", err)
-			}
-		}
-		a.networkPolicyMu.Unlock()
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// 仅当连接了 DJI USB 设备且开启了关闭 4G 策略时，才低频检查是否有未处理的新网卡
+			if a.currentUSBDevice() == nil {
+				continue
+			}
+			a.networkPolicyMu.Lock()
+			if err := a.loadNetworkPolicyLocked(); err == nil && a.force4GOff {
+				// 仅在当前确实存在尚未禁用的 DJI 网卡时才调用 applyCellularPolicyLocked
+				services, err := discoverMacNetworkServices()
+				if err == nil {
+					hasUnapplied := false
+					for _, s := range services {
+						if isDJICellularService(s) && !s.Disabled {
+							isAlreadyDisabled := false
+							for _, d := range a.disabled4GServices {
+								if d == s.Name {
+									isAlreadyDisabled = true
+									break
+								}
+							}
+							if !isAlreadyDisabled {
+								hasUnapplied = true
+								break
+							}
+						}
+					}
+					if hasUnapplied {
+						if err := a.applyCellularPolicyLocked(); err != nil {
+							log.Printf("enforce cellular force-off policy: %v", err)
+						}
+					}
+				}
+			}
+			a.networkPolicyMu.Unlock()
 		}
 	}
 }

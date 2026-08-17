@@ -871,12 +871,7 @@ private struct MessagesView: View {
             if let status = try? await calls.apiClient.smsStatus() { autoCleanupME = status.autoCleanupME }
             await load()
             while !Task.isCancelled {
-                guard settings.autoRefreshEnabled else {
-                    try? await Task.sleep(nanoseconds: 3_000_000_000)
-                    continue
-                }
-                try? await Task.sleep(nanoseconds: max(5_000_000_000, settings.autoRefreshInterval.nanoseconds))
-                guard settings.autoRefreshEnabled, !Task.isCancelled else { continue }
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
                 await load()
             }
         }
@@ -1955,30 +1950,6 @@ private struct SettingsView: View {
                             .pickerStyle(.segmented)
                             .labelsHidden()
                             .frame(width: 190)
-                        }
-                        Divider().padding(.leading, 14)
-                        GeneralRow(title: L10n.t("自动刷新")) {
-                            Toggle("", isOn: $settings.autoRefreshEnabled)
-                                .toggleStyle(.switch)
-                                .labelsHidden()
-                        }
-                        if settings.autoRefreshEnabled {
-                            Divider().padding(.leading, 14)
-                            GeneralRow(title: L10n.t("刷新间隔")) {
-                                Picker("", selection: $settings.autoRefreshInterval) {
-                                    ForEach(AutoRefreshInterval.allCases) { interval in
-                                        Text(interval.displayName).tag(interval)
-                                    }
-                                }
-                                .pickerStyle(.segmented)
-                                .labelsHidden()
-                                .frame(width: 190)
-                            }
-                            Text(L10n.t("提示：开启自动刷新会定期唤醒硬件检测状态，可能会增加功耗与发热。"))
-                                .font(.caption2)
-                                .foregroundStyle(.orange)
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 4)
                         }
                         Divider().padding(.leading, 14)
                         RingtoneDropdown()

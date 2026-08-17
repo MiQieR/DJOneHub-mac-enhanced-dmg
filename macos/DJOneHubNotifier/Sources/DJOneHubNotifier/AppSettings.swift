@@ -43,23 +43,6 @@ enum AppLanguage: String, CaseIterable, Identifiable {
     }
 }
 
-enum AutoRefreshInterval: Int, CaseIterable, Identifiable {
-    case two = 2
-    case five = 5
-    case ten = 10
-    case thirty = 30
-
-    var id: Int { rawValue }
-
-    var displayName: String {
-        return "\(rawValue)s"
-    }
-
-    var nanoseconds: UInt64 {
-        UInt64(rawValue) * 1_000_000_000
-    }
-}
-
 @MainActor
 final class AppSettings: ObservableObject {
     @Published var appearance: AppAppearance {
@@ -74,25 +57,10 @@ final class AppSettings: ObservableObject {
         }
     }
 
-    @Published var autoRefreshEnabled: Bool {
-        didSet {
-            UserDefaults.standard.set(autoRefreshEnabled, forKey: "djonehub.autoRefreshEnabled")
-        }
-    }
-
-    @Published var autoRefreshInterval: AutoRefreshInterval {
-        didSet {
-            UserDefaults.standard.set(autoRefreshInterval.rawValue, forKey: "djonehub.autoRefreshInterval")
-        }
-    }
-
     init() {
         let defaults = UserDefaults.standard
         appearance = AppAppearance(rawValue: defaults.string(forKey: L10n.appearanceKey) ?? "") ?? .system
         language = AppLanguage(rawValue: defaults.string(forKey: L10n.languageKey) ?? "") ?? .system
-        autoRefreshEnabled = defaults.bool(forKey: "djonehub.autoRefreshEnabled")
-        let savedInterval = defaults.integer(forKey: "djonehub.autoRefreshInterval")
-        autoRefreshInterval = AutoRefreshInterval(rawValue: savedInterval) ?? .ten
     }
 }
 
