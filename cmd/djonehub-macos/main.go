@@ -780,19 +780,23 @@ func (a *app) setSMSPollStatus(err error) {
 func (a *app) startSMSPoller(ctx context.Context) {
 	interval := a.smsPollInterval
 	if interval <= 0 {
-		interval = 8 * time.Second
+		interval = 12 * time.Second
 	}
-	timer := time.NewTimer(1200 * time.Millisecond)
+	timer := time.NewTimer(1500 * time.Millisecond)
 	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+			nextInterval := interval
+			if a.currentUSBDevice() == nil {
+				nextInterval = 15 * time.Second
+			}
 			if err := a.pollSMSOnce(); err != nil {
 				log.Printf("SMS poll failed: %v", err)
 			}
-			timer.Reset(interval)
+			timer.Reset(nextInterval)
 		}
 	}
 }
@@ -1000,7 +1004,7 @@ func (a *app) markUSBATDetached(reason string) {
 // open, watches cellular registration, and escalates through gentle recovery
 // steps when the module loses the network for a sustained period.
 func (a *app) startSignalRecovery(ctx context.Context) {
-	const checkInterval = 8 * time.Second
+	const checkInterval = 25 * time.Second
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
 	for {
@@ -1008,7 +1012,9 @@ func (a *app) startSignalRecovery(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			a.signalRecoveryOnce()
+			if a.currentUSBDevice() != nil {
+				a.signalRecoveryOnce()
+			}
 		}
 	}
 }

@@ -36,7 +36,14 @@ final class CallCenter: ObservableObject {
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.pollOnce()
-                let interval: UInt64 = (self?.isOnline ?? true) ? 1_000_000_000 : 3_500_000_000
+                let interval: UInt64
+                if !(self?.isOnline ?? false) {
+                    interval = 5_000_000_000
+                } else if self?.activeCall != nil {
+                    interval = 1_000_000_000
+                } else {
+                    interval = 3_000_000_000
+                }
                 try? await Task.sleep(nanoseconds: interval)
             }
         }
@@ -48,6 +55,10 @@ final class CallCenter: ObservableObject {
         maVoAudio.stop()
         maVoHostRegistered = false
         Task { _ = try? await api.setMaVoAudioHostEnabled(false) }
+    }
+
+    func refreshCalls() async {
+        await pollOnce()
     }
 
     private func pollOnce() async {

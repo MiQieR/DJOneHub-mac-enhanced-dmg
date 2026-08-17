@@ -104,6 +104,7 @@ chmod 755 "${MACOS_DIR}/DJOneHub"
 
 # 图标（使用上游 DJOneHubNotifier 的新图标）
 cp "${NOTIFIER_SRC}/Resources/AppIcon.icns" "${RESOURCES_DIR}/AppIcon.icns"
+cp "${NOTIFIER_SRC}/Resources/AppIcon.icns" "${RESOURCES_DIR}/DJOneHub.icns"
 
 # Go 后端 & libusb（内嵌在 Resources 中，由 ProcessManager 在运行时启动）
 cp "${RELEASE_DIR}/bin/djonehub-macos" "${RESOURCES_DIR}/djonehub-macos"

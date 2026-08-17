@@ -121,16 +121,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !demoCall {
             // 启动 Go 后端（方案 A：由本 App 直接管理后端进程，不依赖 LaunchAgent）
             processManager.startAll()
-            callTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-                Task { @MainActor in await self?.pollCalls() }
-            }
-            smsTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            smsTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
                 Task { @MainActor in await self?.pollMessages() }
             }
-            gpsTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            gpsTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
                 Task { @MainActor in await self?.pollGPSStatus() }
             }
-            cellularTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            cellularTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
                 Task { @MainActor in await self?.pollCellularStatus() }
             }
             NSWorkspace.shared.notificationCenter.addObserver(
@@ -140,9 +137,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 object: nil
             )
             Task {
-                // 等待 Go 后端就绪后，立刻发起首次轮询
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                await pollCalls()
+                // 等待 Go 后端启动就绪后（延时 2 秒），发起初始探测刷新
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
                 await pollMessages()
                 await pollGPSStatus()
                 await pollCellularStatus()
@@ -262,15 +258,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             seenCallHistoryIDs.formUnion(history.map(\.id))
         } catch {
             consecutiveErrors += 1
-            if consecutiveErrors == 5 {
-                // 连续 5 次轮询失败时弹窗提示（不再通过 LaunchAgent 重启后台服务）
-                panel.show(
-                    .error(message: error.localizedDescription),
-                    onReject: {},
-                    onAnswer: {},
-                    onOpen: openDJOneHub
-                )
-            }
         }
     }
 

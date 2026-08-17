@@ -5,6 +5,7 @@ import AppKit
 
 struct MoreView: View {
     @EnvironmentObject private var calls: CallCenter
+    @EnvironmentObject private var settings: AppSettings
 
     @State private var modem: ModemStatus?
     @State private var traffic: NetworkTrafficSnapshot?
@@ -449,8 +450,12 @@ struct MoreView: View {
         .task {
             await refreshAll()
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                // 轻量状态（4G 策略开关）自动刷新，与网页端/后台变更保持同步
+                guard settings.autoRefreshEnabled else {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    continue
+                }
+                try? await Task.sleep(nanoseconds: settings.autoRefreshInterval.nanoseconds)
+                guard settings.autoRefreshEnabled, !Task.isCancelled else { continue }
                 if let p = try? await calls.apiClient.cellularPolicy() {
                     policy = p
                 }
@@ -821,6 +826,7 @@ private enum OperatorName {
 /// 每 2 秒采样一次流量计数，用相邻两次采样计算实时速率（与网页端一致）。
 struct DeviceStatusCard: View {
     @EnvironmentObject private var calls: CallCenter
+    @EnvironmentObject private var settings: AppSettings
 
     @State private var status: ModemStatus?
     @State private var traffic: NetworkTrafficSnapshot?
@@ -875,7 +881,7 @@ struct DeviceStatusCard: View {
                     await sampleOnce()
                 }
                 .frame(maxWidth: 100)
-                Text(L10n.t("每 2 秒自动更新"))
+                Text(settings.autoRefreshEnabled ? L10n.f("每 %@ 秒自动更新", String(settings.autoRefreshInterval.rawValue)) : L10n.t("手动刷新模式"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -886,9 +892,15 @@ struct DeviceStatusCard: View {
         }
         .modifier(PhoneCard())
         .task {
+            await sampleOnce()
             while !Task.isCancelled {
+                guard settings.autoRefreshEnabled else {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    continue
+                }
+                try? await Task.sleep(nanoseconds: settings.autoRefreshInterval.nanoseconds)
+                guard settings.autoRefreshEnabled, !Task.isCancelled else { continue }
                 await sampleOnce()
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
         }
     }
