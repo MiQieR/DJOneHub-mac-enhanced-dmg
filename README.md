@@ -3,7 +3,7 @@
 > 让大疆第一代 4G 模块成为 Mac 上长期可用的实体 SIM 终端。
 
 > [!IMPORTANT]
-> 📦 **标准应用安装包已上传**：[Releases](https://github.com/MiQieR/DJOneHub-mac-enhanced/releases) 提供标准 macOS DMG 安装包，双击打开后拖拽 `DJOneHub.app` 到 `Applications` 目录即可完成安装：
+> 📦 **标准应用安装包已上传**：[Releases](https://github.com/MiQieR/DJOneHub-mac-enhanced-dmg/releases) 提供标准 macOS DMG 安装包，双击打开后拖拽 `DJOneHub.app` 到 `Applications` 目录即可完成安装：
 > - `DJOneHub-macOS-universal-v1.2.9.dmg`：基于上游 v1.2.9，支持 Apple Silicon 与 Intel Mac 通用双架构；包含完整通话、短信、联系人、GPS、eSIM 管理功能。
 >
 > 更新内容见 [CHANGELOG.md](CHANGELOG.md)。

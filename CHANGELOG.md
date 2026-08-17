@@ -24,7 +24,7 @@
 
 ### 防倒退（维护标准）
 - 安装方式保持 DMG 拖拽安装，无 `.command` 脚本，无 LaunchAgent 强制自启
-- Release 链接指向本 fork：`https://github.com/MiQieR/DJOneHub-mac-enhanced/releases`
+- Release 链接指向本 fork：`https://github.com/MiQieR/DJOneHub-mac-enhanced-dmg/releases`
 
 
 

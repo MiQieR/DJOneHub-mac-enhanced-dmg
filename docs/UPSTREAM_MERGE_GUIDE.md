@@ -1,12 +1,12 @@
 # 上游版本合并与 macOS 架构维护指南
 
-本文档记录如何将上游项目 [rogerbush007-a11y/DJOneHub-mac-enhanced](https://github.com/rogerbush007-a11y/DJOneHub-mac-enhanced) 的最新改动合并到本 fork（[MiQieR/DJOneHub-mac-enhanced](https://github.com/MiQieR/DJOneHub-mac-enhanced)），并确保本仓库特有的**标准 macOS 应用架构（.app + 状态栏启动器 + 拖拽 DMG 安装）**不被破坏或回退。
+本文档记录如何将上游项目 [rogerbush007-a11y/DJOneHub-mac-enhanced](https://github.com/rogerbush007-a11y/DJOneHub-mac-enhanced) 的最新改动合并到本 fork（[MiQieR/DJOneHub-mac-enhanced-dmg](https://github.com/MiQieR/DJOneHub-mac-enhanced-dmg)），并确保本仓库特有的**标准 macOS 应用架构（.app + 状态栏启动器 + 拖拽 DMG 安装）**不被破坏或回退。
 
 > [!IMPORTANT]
 > **给后续维护者 / AI Agent 的核心警示**：
 > 1. 本 fork 的核心定位是提供**符合 macOS 规范的标准 GUI 应用体验**，彻底摒弃上游原版的命令行脚本安装与 LaunchAgent 强制开机自启。
 > 2. **严禁**在合并代码时回退到上游的 `.command` 脚本打包模式或重新引入 LaunchAgent 开机自启。
-> 3. 所有发布的 Release 链接和文档说明必须指向本 fork 仓库：`https://github.com/MiQieR/DJOneHub-mac-enhanced`。
+> 3. 所有发布的 Release 链接和文档说明必须指向本 fork 仓库：`https://github.com/MiQieR/DJOneHub-mac-enhanced-dmg`。
 
 ---
 
@@ -108,12 +108,12 @@ git merge upstream/main --no-edit
 上游维护的是“脚本安装 + 历史下载列表”，我们维护的是“标准 App 拖拽安装”。
 - **保留**本 fork 的标准 App 安装说明与交互介绍。
 - **更新**版本号为上游新版本，并同步新版本特性介绍。
-- **确保** Releases 链接指向本 fork：`https://github.com/MiQieR/DJOneHub-mac-enhanced/releases`。
+- **确保** Releases 链接指向本 fork：`https://github.com/MiQieR/DJOneHub-mac-enhanced-dmg/releases`。
 
 示例参考模板：
 ```markdown
 > [!IMPORTANT]
-> 📦 **标准应用安装包已上传**：[Releases](https://github.com/MiQieR/DJOneHub-mac-enhanced/releases) 提供标准 macOS DMG 安装包，双击打开后拖拽 `DJOneHub.app` 到 `Applications` 目录即可完成安装：
+> 📦 **标准应用安装包已上传**：[Releases](https://github.com/MiQieR/DJOneHub-mac-enhanced-dmg/releases) 提供标准 macOS DMG 安装包，双击打开后拖拽 `DJOneHub.app` 到 `Applications` 目录即可完成安装：
 > - `DJOneHub-macOS-universal-v<新版本>.dmg`：基于上游 v<新版本>，支持 Apple Silicon 与 Intel Mac 通用双架构；<新特性说明>
 ```
 
