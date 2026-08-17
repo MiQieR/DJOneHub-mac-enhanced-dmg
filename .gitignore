@@ -6,6 +6,8 @@
 /bin/
 **/.build/
 **/dist/
+/djonehub-macos
+**/.build-stale/
 backups/
 .cache/
 *.test

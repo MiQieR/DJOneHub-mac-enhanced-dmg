@@ -1,17 +1,15 @@
 import SwiftUI
 
 struct NotifierView: View {
+    @EnvironmentObject private var contacts: ContactStore
     let content: PanelContent
     let onReject: () -> Void
+    let onAnswer: () -> Void
     let onOpen: () -> Void
+    var onSizeChange: ((CGSize) -> Void)?
 
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(.ultraThinMaterial)
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .strokeBorder(.white.opacity(0.24), lineWidth: 0.8)
-
+        Group {
             switch content {
             case let .incoming(number, startedAt):
                 incomingView(number: number, startedAt: startedAt)
@@ -25,26 +23,38 @@ struct NotifierView: View {
                 EmptyView()
             }
         }
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(.ultraThinMaterial)
+        )
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(.white.opacity(0.24), lineWidth: 0.8)
+        )
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear { onSizeChange?(geo.size) }
+                    .onChange(of: geo.size) { newSize in
+                        onSizeChange?(newSize)
+                    }
+            }
+        )
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .shadow(color: .black.opacity(0.22), radius: 20, y: 8)
     }
 
     private func incomingView(number: String, startedAt: Date) -> some View {
-        VStack(spacing: 8) {
-            VStack(spacing: 2) {
-                Text("DJOneHub 来电")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Text(number)
-                    .font(.system(size: 20, weight: .semibold, design: .rounded))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                Text(startedAt, style: .time)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
+        let contact = contacts.contact(for: number)
+        let displayName = contact?.name
+        let title = displayName ?? number
+        let avatar = contact?.photoData.flatMap(NSImage.init(data:))
+        return VStack(spacing: 8) {
+            infoBlock(title: title, number: number, startedAt: startedAt, avatar: avatar)
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onOpen)
 
-            HStack(spacing: 38) {
+            HStack(spacing: 30) {
                 callAction(
                     title: "拒接",
                     symbol: "phone.down.fill",
@@ -52,15 +62,58 @@ struct NotifierView: View {
                     action: onReject
                 )
                 callAction(
-                    title: "详情",
-                    symbol: "arrow.up.forward.app.fill",
+                    title: "接听",
+                    symbol: "phone.fill",
                     color: .green,
-                    action: onOpen
+                    action: onAnswer
                 )
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
+        // 宽度对齐原生来电卡片（320pt），内容居中；高度仍随内容自适应
+        .frame(width: 292)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    @ViewBuilder
+    private func infoBlock(
+        title: String,
+        number: String,
+        startedAt: Date,
+        avatar: NSImage?
+    ) -> some View {
+        VStack(spacing: 3) {
+            // 仅当通讯录里有照片时显示头像；号码居中展示
+            if let avatar {
+                Image(nsImage: avatar)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 40, height: 40)
+                    .clipShape(Circle())
+            }
+            Text("DJOneHub 来电")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(title)
+                .font(.system(size: 22, weight: .semibold, design: .rounded))
+                .lineLimit(2)
+                .minimumScaleFactor(0.7)
+                .multilineTextAlignment(.center)
+            if title != number {
+                Text("\(number) · \(startedAt, style: .time) · 点击查看详情")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            } else {
+                Text("\(startedAt, style: .time) · 点击查看详情")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+        }
+        .frame(maxWidth: .infinity)
     }
 
     private func callAction(
@@ -78,7 +131,7 @@ struct NotifierView: View {
                     .foregroundStyle(.white)
                     .clipShape(Circle())
                 Text(title)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.caption2.weight(.medium))
                     .foregroundStyle(.primary)
             }
         }
@@ -101,11 +154,11 @@ struct NotifierView: View {
                             .lineLimit(1)
                         Spacer()
                         Text("现在")
-                            .font(.system(size: 9))
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
                     Text(preview)
-                        .font(.system(size: 11))
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .multilineTextAlignment(.leading)
@@ -127,9 +180,9 @@ struct NotifierView: View {
                     Text("未接来电")
                         .font(.system(size: 12, weight: .semibold))
                     Text(number)
-                        .font(.system(size: 11))
+                        .font(.caption)
                     Text(startedAt, style: .time)
-                        .font(.system(size: 9))
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()

@@ -8,9 +8,33 @@ let package = Package(
         .executable(name: "DJOneHubNotifier", targets: ["DJOneHubNotifier"]),
     ],
     targets: [
+        .target(
+            name: "CModemBridge",
+            path: "Sources/CModemBridge",
+            publicHeadersPath: "include",
+            linkerSettings: [
+                .linkedFramework("CoreFoundation"),
+                .linkedFramework("IOKit"),
+            ]
+        ),
+        .target(
+            name: "CUACProbe",
+            path: "Sources/CUACProbe",
+            publicHeadersPath: "include",
+            linkerSettings: [
+                .linkedFramework("CoreAudio"),
+                .linkedFramework("CoreFoundation"),
+                .linkedFramework("IOKit"),
+            ]
+        ),
         .executableTarget(
             name: "DJOneHubNotifier",
-            path: "Sources/DJOneHubNotifier"
+            dependencies: ["CModemBridge", "CUACProbe"],
+            path: "Sources/DJOneHubNotifier",
+            swiftSettings: [.swiftLanguageMode(.v5)],
+            linkerSettings: [
+                .linkedFramework("ServiceManagement"),
+            ]
         ),
     ]
 )

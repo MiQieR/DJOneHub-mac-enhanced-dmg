@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,6 +33,7 @@ import (
 	"github.com/iniwex5/vohive/internal/esim"
 	"github.com/iniwex5/vohive/internal/modem"
 	"github.com/iniwex5/vohive/pkg/smscodec"
+	"go.bug.st/serial"
 )
 
 //go:embed web/*
@@ -81,12 +83,14 @@ type app struct {
 	usbAT             *usbAT
 	port              string
 	demo              bool
+	webConsole        bool
 	discoveryError    string
 	usbDevice         *usbDeviceStatus
 	usbATBackoffUntil time.Time
 	usbATBackoffErr   string
 
 	smsMu          sync.RWMutex
+	smsOperationMu sync.Mutex
 	sms            []receivedSMS
 	smsSendMu      sync.Mutex
 	smsReassembler *smscodec.Reassembler
@@ -96,14 +100,33 @@ type app struct {
 	smsLastPoll      time.Time
 	smsLastPollError string
 
-	callMu            sync.RWMutex
-	activeCall        *callRecord
-	callHistory       []callRecord
-	callPollInterval  time.Duration
-	callLastPoll      time.Time
-	callLastPollError string
-	callConfigured    bool
-	callNotifier      func(callRecord)
+	callMu             sync.RWMutex
+	activeCall         *callRecord
+	callHistory        []callRecord
+	callPollInterval   time.Duration
+	callLastPoll       time.Time
+	callLastPollError  string
+	callConfigured     bool
+	lastAnswerAt       time.Time
+	callNotifier       func(callRecord)
+	audio              *audioRouter
+	audioManualSet     bool
+	audioManualOn      bool
+	lastAudioHealthLog time.Time
+	// The native notifier registers this before a call.  When present, the
+	// backend owns only module control and call state; MaVo's Swift service owns
+	// every host-audio callback and media loop.
+	swiftAudioHost bool
+
+	moduleVoiceMu     sync.Mutex
+	moduleVoiceOpMu   sync.Mutex
+	moduleVoiceReady  bool
+	moduleVoiceLast   time.Time
+	moduleVoiceErr    string
+	moduleVoiceDetail string
+
+	moduleSetupMu sync.RWMutex
+	moduleSetup   moduleSetupStatus
 
 	gpsMu          sync.RWMutex
 	gpsEnabled     bool
@@ -127,7 +150,11 @@ type app struct {
 	disabled4GServices  []string
 	networkPolicyPath   string
 
-	networkRepairMu sync.Mutex
+	networkRepairMu        sync.Mutex
+	usbProfileMu           sync.Mutex
+	usbProfileIntentLoaded bool
+	usbProfileMobileArmed  bool
+	usbProfileIntentPath   string
 
 	usbATOpenMu      sync.Mutex
 	recoveryMu       sync.Mutex
@@ -175,6 +202,50 @@ type pdpContext struct {
 	APN string `json:"apn"`
 }
 
+type usbProfileStatus struct {
+	Mode           string `json:"mode"`
+	UACEnabled     bool   `json:"uac_enabled"`
+	Configuration  string `json:"configuration"`
+	NeedsReconnect bool   `json:"needs_reconnect"`
+	Message        string `json:"message,omitempty"`
+}
+
+type usbConfig struct{ fields []string }
+
+func (c usbConfig) uacEnabled() bool { return len(c.fields) == 9 && c.fields[8] == "1" }
+
+func (c usbConfig) withUAC(enabled bool) string {
+	fields := append([]string(nil), c.fields...)
+	if enabled {
+		fields[8] = "1"
+	} else {
+		fields[8] = "0"
+	}
+	return `AT+QCFG="usbcfg",` + strings.Join(fields, ",")
+}
+
+func parseUSBConfig(resp string) (usbConfig, error) {
+	re := regexp.MustCompile(`(?im)^\s*\+QCFG:\s*"usbcfg"\s*,\s*([^\r\n]+)`)
+	match := re.FindStringSubmatch(resp)
+	if len(match) != 2 {
+		return usbConfig{}, errors.New("模块未返回可识别的 USBCFG 配置")
+	}
+	fields := strings.Split(match[1], ",")
+	if len(fields) != 9 {
+		return usbConfig{}, fmt.Errorf("USBCFG 功能位数量异常（%d），已拒绝写入", len(fields))
+	}
+	for i := range fields {
+		fields[i] = strings.TrimSpace(fields[i])
+		if fields[i] == "" {
+			return usbConfig{}, errors.New("USBCFG 含空字段，已拒绝写入")
+		}
+	}
+	if fields[8] != "0" && fields[8] != "1" {
+		return usbConfig{}, fmt.Errorf("USBCFG UAC 位异常（%s），已拒绝写入", fields[8])
+	}
+	return usbConfig{fields: fields}, nil
+}
+
 type macNetInterface struct {
 	Name   string `json:"name"`
 	Status string `json:"status"`
@@ -217,16 +288,22 @@ type cellularPolicyStatus struct {
 }
 
 func main() {
+	platformCleanup := initPlatformRuntime()
+	defer platformCleanup()
+
 	var port string
 	var listen string
 	var demo bool
+	var webConsole bool
 	flag.StringVar(&port, "port", "", "AT serial port; auto-detected when omitted")
 	flag.StringVar(&listen, "listen", "127.0.0.1:7575", "HTTP listen address")
 	flag.BoolVar(&demo, "demo", false, "run the web UI with simulated modem data")
+	flag.BoolVar(&webConsole, "web-console", false, "serve the embedded compatibility console")
 	flag.Parse()
 
 	if demo {
 		instance := newDemoApp()
+		instance.webConsole = webConsole
 		log.Printf("DJOneHub demo mode")
 		serve(instance, listen)
 		return
@@ -247,6 +324,8 @@ func main() {
 				smsAutoCleanupME: true,
 				smsReassembler:   smscodec.NewReassembler(),
 				callPollInterval: 3 * time.Second,
+				audio:            newAudioRouter(),
+				webConsole:       webConsole,
 			}
 			if usbDevice != nil {
 				log.Printf("DJI USB device detected without AT serial port: %s %s (%s:%s)",
@@ -259,8 +338,18 @@ func main() {
 				instance.discoveryError = ""
 				defer usbATDevice.Close()
 				log.Printf("USB AT bridge opened on DJI %s", usbATDevice.Description())
-				instance.initUSBATESIMManager()
-				instance.ensureCellularDHCP()
+				if changed, profileErr := instance.autoEnableMacAudioProfile(); profileErr != nil {
+					log.Printf("Mac audio profile check: %v", profileErr)
+				} else if changed {
+					instance.discoveryError = "正在恢复 Mac 完整模式，请等待模块重新连接"
+				}
+				if instance.usbAT != nil {
+					instance.initUSBATESIMManager()
+					// Network repair can wait through two DHCP attempts. Do not
+					// hold the local API listener hostage during startup: the App
+					// must be able to show module/setup progress while 4G settles.
+					go instance.ensureCellularDHCP()
+				}
 			}
 			log.Printf("modem discovery skipped: %v", err)
 			go instance.startSMSPoller(context.Background())
@@ -295,6 +384,8 @@ func main() {
 		modem: manager, port: port,
 		smsPollInterval: 8 * time.Second, smsAutoCleanupME: true,
 		callPollInterval: 3 * time.Second,
+		audio:            newAudioRouter(),
+		webConsole:       webConsole,
 	}
 	manager.SetSMSCallback(instance.recordSMS)
 	if err := manager.Start(); err != nil {
@@ -383,9 +474,19 @@ func serve(instance *app, listen string) {
 		log.Printf("DJOneHub is using %s", instance.port)
 	}
 	log.Printf("Open http://%s", listen)
+	listener, err := net.Listen("tcp", listen)
+	if err != nil {
+		if platformOpenExistingUI("http://" + listen) {
+			return
+		}
+		log.Printf("HTTP listen failed: %v", err)
+		return
+	}
+	openPlatformUI("http://" + listen)
+
 	serveErr := make(chan error, 1)
 	go func() {
-		serveErr <- server.ListenAndServe()
+		serveErr <- server.Serve(listener)
 	}()
 
 	select {
@@ -427,18 +528,11 @@ func newDemoApp() *app {
 }
 
 func discoverATPort() (string, error) {
-	var ports []string
-	for _, pattern := range []string{
-		"/dev/cu.usbmodem*",
-		"/dev/cu.usbserial*",
-		"/dev/cu.wchusbserial*",
-	} {
-		matches, err := filepath.Glob(pattern)
-		if err != nil {
-			return "", err
-		}
-		ports = append(ports, matches...)
+	ports, err := serial.GetPortsList()
+	if err != nil {
+		return "", fmt.Errorf("list serial ports: %w", err)
 	}
+	ports = filterCandidateATPorts(ports, runtime.GOOS)
 
 	sort.SliceStable(ports, func(i, j int) bool {
 		return portScore(ports[i]) > portScore(ports[j])
@@ -451,9 +545,36 @@ func discoverATPort() (string, error) {
 		}
 	}
 	if len(attempted) == 0 {
+		if runtime.GOOS == "windows" {
+			return "", errors.New("no Windows COM ports found; install the module serial driver or pass -port COMx explicitly")
+		}
 		return "", errors.New("no Quectel/DJI USB serial ports found; pass -port /dev/cu.* explicitly")
 	}
 	return "", fmt.Errorf("no AT-capable port found among %s", strings.Join(attempted, ", "))
+}
+
+func filterCandidateATPorts(ports []string, goos string) []string {
+	filtered := make([]string, 0, len(ports))
+	for _, port := range ports {
+		name := strings.ToLower(strings.TrimSpace(port))
+		if name == "" {
+			continue
+		}
+		if goos == "windows" {
+			if strings.HasPrefix(name, "com") {
+				filtered = append(filtered, port)
+			}
+			continue
+		}
+		if strings.Contains(name, "usbmodem") ||
+			strings.Contains(name, "usbserial") ||
+			strings.Contains(name, "wchusbserial") ||
+			strings.Contains(name, "quectel") ||
+			strings.Contains(name, "dji") {
+			filtered = append(filtered, port)
+		}
+	}
+	return filtered
 }
 
 func portScore(port string) int {
@@ -466,6 +587,9 @@ func portScore(port string) int {
 	}
 	if strings.Contains(name, "usbserial") {
 		return 60
+	}
+	if strings.HasPrefix(name, "com") {
+		return 50
 	}
 	return 0
 }
@@ -480,7 +604,7 @@ func discoverDJIUSBDevice() *usbDeviceStatus {
 	for _, block := range strings.Split(string(out), "\n\n") {
 		vendorID, okVendor := intProperty(block, "idVendor")
 		productID, okProduct := intProperty(block, "idProduct")
-		if !okVendor || !okProduct || vendorID != 0x2ca3 {
+		if !okVendor || !okProduct || !isSupportedUSBModuleIdentity(vendorID, productID) {
 			continue
 		}
 		if device == nil {
@@ -660,6 +784,8 @@ func (a *app) pollSMSOnce() error {
 	if a.demo || a.modem != nil {
 		return nil
 	}
+	a.smsOperationMu.Lock()
+	defer a.smsOperationMu.Unlock()
 	if err := a.ensureUSBAT(); err != nil {
 		a.setSMSPollStatus(err)
 		return err
@@ -725,11 +851,64 @@ func (a *app) ensureUSBAT() error {
 	a.port = dev.Description()
 	a.discoveryError = ""
 	log.Printf("USB AT bridge opened on DJI %s", dev.Description())
+	if changed, err := a.autoEnableMacAudioProfile(); err != nil {
+		log.Printf("Mac audio profile check: %v", err)
+	} else if changed {
+		return nil
+	}
 	// The first open may fail while USB is re-enumerating. When a later poll
 	// succeeds, rebuild the eSIM service that startup could not create.
 	a.initUSBATESIMManager()
 	a.ensureCellularDHCP()
+	a.kickModuleVoice()
 	return nil
+}
+
+// autoEnableMacAudioProfile restores UAC only after this installation explicitly
+// saved iPhone/iPad mode. A newly installed App must never infer intent from a
+// non-UAC USB tuple: that tuple may be an untouched factory module or a module
+// configured by another tool.
+func (a *app) autoEnableMacAudioProfile() (bool, error) {
+	if a.demo || a.usbAT == nil {
+		return false, nil
+	}
+	a.usbProfileMu.Lock()
+	err := a.loadUSBProfileIntentLocked()
+	armed := a.usbProfileMobileArmed
+	a.usbProfileMu.Unlock()
+	if err != nil {
+		return false, err
+	}
+	if !armed {
+		return false, nil
+	}
+	response, err := a.usbAT.Command(`AT+QCFG="usbcfg"`, 8*time.Second)
+	if err != nil {
+		return false, err
+	}
+	config, err := parseUSBConfig(response)
+	if err != nil {
+		return false, err
+	}
+	if config.uacEnabled() {
+		return false, nil
+	}
+	if _, err := a.usbAT.Command(config.withUAC(true), 8*time.Second); err != nil {
+		return false, err
+	}
+	a.usbProfileMu.Lock()
+	a.usbProfileMobileArmed = false
+	if err := a.persistUSBProfileIntentLocked(); err != nil {
+		a.usbProfileMu.Unlock()
+		return false, err
+	}
+	a.usbProfileMu.Unlock()
+	if _, err := a.usbAT.Command("AT+CFUN=1,1", 3*time.Second); err != nil {
+		return false, err
+	}
+	log.Printf("module arrived in iPhone/iPad mode; restoring Mac USB Audio and re-enumerating")
+	a.markUSBATDetached("switching to Mac complete USB profile")
+	return true, nil
 }
 
 const usbATOpenTimeout = 12 * time.Second
@@ -788,6 +967,9 @@ func (a *app) markUSBATDetached(reason string) {
 	a.discoveryError = "DJI USB device is not connected"
 	a.usbATBackoffUntil = time.Now().Add(2 * time.Second)
 	a.usbATBackoffErr = reason
+	// A module reboot or re-enumeration can change USBCFG outside this process.
+	// Do not keep reporting a previously cached "ready" state in that case.
+	a.invalidateReadyModuleSetup()
 	a.callMu.Lock()
 	a.callConfigured = false
 	a.callMu.Unlock()
@@ -894,15 +1076,34 @@ func (a *app) recoverSignal() {
 
 func (a *app) routes() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/platform", a.platformInfo)
 	mux.HandleFunc("GET /api/health", a.health)
 	mux.HandleFunc("GET /api/status", a.status)
 	mux.HandleFunc("GET /api/sms", a.listSMS)
 	mux.HandleFunc("GET /api/sms/status", a.smsStatus)
+	mux.HandleFunc("PATCH /api/sms/settings", a.updateSMSSettings)
+	mux.HandleFunc("GET /api/sim/identity", a.simIdentity)
 	mux.HandleFunc("POST /api/sms/send", a.sendSMS)
 	mux.HandleFunc("POST /api/sms/refresh", a.refreshSMS)
 	mux.HandleFunc("POST /api/sms/clear-module", a.clearModuleSMS)
 	mux.HandleFunc("GET /api/calls/status", a.callStatus)
 	mux.HandleFunc("POST /api/calls/reject", a.rejectCall)
+	mux.HandleFunc("POST /api/calls/answer", a.answerCall)
+	mux.HandleFunc("POST /api/calls/hangup", a.hangupCall)
+	mux.HandleFunc("POST /api/calls/dtmf", a.dtmfCall)
+	mux.HandleFunc("POST /api/calls/dial", a.dialCall)
+	mux.HandleFunc("POST /api/calls/audio/start", a.audioStart)
+	mux.HandleFunc("POST /api/calls/audio/stop", a.audioStop)
+	mux.HandleFunc("POST /api/calls/audio/mute", a.audioMute)
+	mux.HandleFunc("POST /api/calls/audio/record", a.audioRecord)
+	mux.HandleFunc("POST /api/calls/audio/host/register", a.audioHostRegister)
+	mux.HandleFunc("GET /api/calls/audio/host/config", a.audioHostConfig)
+	mux.HandleFunc("GET /api/voice/status", a.voiceStatusAPI)
+	mux.HandleFunc("POST /api/voice/provision", a.voiceProvisionAPI)
+	mux.HandleFunc("GET /api/module/setup", a.moduleSetupStatusAPI)
+	mux.HandleFunc("POST /api/module/setup", a.moduleSetupStartAPI)
+	mux.HandleFunc("POST /api/voice/start", a.voiceStartAPI)
+	mux.HandleFunc("POST /api/voice/stop", a.voiceStopAPI)
 	mux.HandleFunc("GET /api/gps", a.gpsStatus)
 	mux.HandleFunc("POST /api/gps/start", a.startGPS)
 	mux.HandleFunc("POST /api/gps/stop", a.stopGPS)
@@ -916,6 +1117,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/network/check-proxy", a.checkProxyRoute)
 	mux.HandleFunc("POST /api/network/usbnet", a.setUSBNetMode)
 	mux.HandleFunc("POST /api/network/reboot-module", a.rebootModule)
+	mux.HandleFunc("GET /api/usb/profile", a.usbProfile)
+	mux.HandleFunc("POST /api/usb/profile", a.setUSBProfile)
 	mux.HandleFunc("GET /api/esim", a.esimOverview)
 	mux.HandleFunc("GET /api/esim/notes", a.listESIMNotes)
 	mux.HandleFunc("PUT /api/esim/notes", a.saveESIMNote)
@@ -927,9 +1130,35 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("PATCH /api/esim/profile", a.renameESIMProfile)
 	mux.HandleFunc("DELETE /api/esim/profile", a.deleteESIMProfile)
 	mux.HandleFunc("POST /api/esim/download", a.downloadESIMProfile)
-	content, _ := fs.Sub(webAssets, "web")
-	mux.Handle("/", http.FileServer(http.FS(content)))
+	if runtime.GOOS == "windows" || a.webConsole {
+		assets, err := fs.Sub(webAssets, "web")
+		if err != nil {
+			panic(fmt.Sprintf("open embedded web console: %v", err))
+		}
+		mux.Handle("/", http.FileServer(http.FS(assets)))
+		return securityHeaders(mux)
+	}
+
+	// macOS 日常操作迁移到独立 App；根路径保留兼容提示。
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("DJOneHub 已迁移到 macOS 应用，请使用 DJOneHub App 完成全部操作。"))
+	})
 	return securityHeaders(mux)
+}
+
+func (a *app) platformInfo(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version":               "1.2.4",
+		"os":                    runtime.GOOS,
+		"web_console":           runtime.GOOS == "windows" || a.webConsole,
+		"call_audio":            runtime.GOOS == "darwin",
+		"direct_usb_at":         runtime.GOOS == "darwin",
+		"esim_full":             runtime.GOOS == "darwin",
+		"network_policy_native": runtime.GOOS == "darwin",
+		"native_contacts":       runtime.GOOS == "darwin",
+	})
 }
 
 func securityHeaders(next http.Handler) http.Handler {
@@ -957,7 +1186,7 @@ func (a *app) status(w http.ResponseWriter, _ *http.Request) {
 			Firmware:      "EG25GGBR07A08M2G",
 			ICCID:         "89860123456789012345",
 			IMSI:          "460001234567890",
-			Operator:      "China Mobile",
+			Operator:      "中国移动",
 			SimInserted:   true,
 			SignalDBM:     -73,
 			SignalRSRP:    -96,
@@ -1048,7 +1277,7 @@ func (a *app) usbATStatus() (modem.DeviceStatus, error) {
 		Firmware:      parseUSBATFirmware(firmwareResp),
 		ICCID:         parseUSBATPrefixed(qccidResp, "+QCCID:"),
 		IMSI:          parseUSBATIMSI(cimiResp),
-		Operator:      parseUSBATOperator(copsResp),
+		Operator:      modem.NormalizeServingOperatorName(parseUSBATOperator(copsResp), parseUSBATIMSI(cimiResp)),
 		SimInserted:   strings.Contains(strings.ToUpper(cpinResp), "READY"),
 		SignalDBM:     parseUSBATCSQDBM(csqResp),
 		RegStatus:     regStatus,
@@ -1060,7 +1289,7 @@ func (a *app) usbATStatus() (modem.DeviceStatus, error) {
 		USBNetMode:    usbnetMode,
 	}
 	if status.Operator == "" && strings.Contains(copsResp, "CHN-UNICOM") {
-		status.Operator = "CHN-UNICOM"
+		status.Operator = "中国联通"
 	}
 	return status, nil
 }
@@ -1279,6 +1508,37 @@ func (a *app) clearUSBATSMSMemory(memory string) (before, after int, err error) 
 	return before, after, nil
 }
 
+type smsStorageClearResult struct {
+	Memory string `json:"memory"`
+	Before int    `json:"before"`
+	After  int    `json:"after"`
+}
+
+// clearAllUSBATSMS removes messages from both stores surfaced by readUSBATSMS.
+// The previous implementation only cleared ME while the inbox also showed SM,
+// which made a successful delete look like it had done nothing.
+func (a *app) clearAllUSBATSMS() ([]smsStorageClearResult, error) {
+	results := make([]smsStorageClearResult, 0, 2)
+	for _, memory := range []string{"SM", "ME"} {
+		before, after, err := a.clearUSBATSMSMemory(memory)
+		if err != nil {
+			return results, fmt.Errorf("clear %s SMS: %w", memory, err)
+		}
+		results = append(results, smsStorageClearResult{
+			Memory: memory,
+			Before: before,
+			After:  after,
+		})
+	}
+	return results, nil
+}
+
+func (a *app) clearSMSCache() {
+	a.smsMu.Lock()
+	defer a.smsMu.Unlock()
+	a.sms = nil
+}
+
 func parseUSBATCPMSUsed(resp string) int {
 	re := regexp.MustCompile(`\+CPMS:\s*(\d+),`)
 	match := re.FindStringSubmatch(resp)
@@ -1368,6 +1628,61 @@ func (a *app) smsStatus(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+func (a *app) updateSMSSettings(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		AutoCleanupME *bool `json:"auto_cleanup_me"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.AutoCleanupME == nil {
+		writeError(w, http.StatusBadRequest, "auto_cleanup_me is required")
+		return
+	}
+	a.smsOperationMu.Lock()
+	a.smsAutoCleanupME = *body.AutoCleanupME
+	a.smsOperationMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]bool{"auto_cleanup_me": a.smsAutoCleanupME})
+}
+
+func (a *app) simIdentity(w http.ResponseWriter, r *http.Request) {
+	if a.demo {
+		writeJSON(w, http.StatusOK, map[string]string{"phone_number": "+8613800138000"})
+		return
+	}
+	a.smsOperationMu.Lock()
+	defer a.smsOperationMu.Unlock()
+	if err := a.ensureUSBAT(); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	response, err := a.runATCommand("AT+CNUM", 3*time.Second)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"phone_number": parseCNUM(response)})
+}
+
+func parseCNUM(response string) string {
+	for _, line := range strings.Split(response, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(strings.ToUpper(line), "+CNUM:") {
+			continue
+		}
+		fields := strings.Split(strings.TrimSpace(line[len("+CNUM:"):]), ",")
+		if len(fields) < 2 {
+			continue
+		}
+		raw := strings.Trim(strings.TrimSpace(fields[1]), `"`)
+		digits := regexp.MustCompile(`[^0-9+]`).ReplaceAllString(raw, "")
+		if len(strings.TrimPrefix(digits, "+")) >= 5 {
+			return digits
+		}
+	}
+	return ""
+}
+
 func (a *app) refreshSMS(w http.ResponseWriter, _ *http.Request) {
 	if a.demo {
 		writeJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
@@ -1390,7 +1705,7 @@ func (a *app) refreshSMS(w http.ResponseWriter, _ *http.Request) {
 
 func (a *app) clearModuleSMS(w http.ResponseWriter, _ *http.Request) {
 	if a.demo {
-		writeJSON(w, http.StatusOK, map[string]any{"cleared": true, "before": 0, "after": 0})
+		writeJSON(w, http.StatusOK, map[string]any{"cleared": true, "before": 0, "after": 0, "storages": []string{"SM", "ME"}})
 		return
 	}
 	if a.modem != nil {
@@ -1401,16 +1716,27 @@ func (a *app) clearModuleSMS(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "AT serial port is unavailable: "+err.Error())
 		return
 	}
-	before, after, err := a.clearUSBATSMSMemory("ME")
+	a.smsOperationMu.Lock()
+	defer a.smsOperationMu.Unlock()
+	results, err := a.clearAllUSBATSMS()
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	before, after := 0, 0
+	for _, result := range results {
+		before += result.Before
+		after += result.After
+	}
+	// The inbox is a local cache so it can continue showing messages after
+	// automatic ME cleanup. A manual delete is explicit, therefore remove the
+	// matching cached view as well instead of making the UI appear unchanged.
+	a.clearSMSCache()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"cleared": true,
-		"memory":  "ME",
-		"before":  before,
-		"after":   after,
+		"cleared":  true,
+		"before":   before,
+		"after":    after,
+		"storages": results,
 	})
 }
 
@@ -2218,6 +2544,150 @@ func (a *app) rebootModule(w http.ResponseWriter, _ *http.Request) {
 		"accepted": true,
 		"response": response,
 	})
+}
+
+func (a *app) readUSBProfile() (usbConfig, string, error) {
+	response, err := a.runATCommand(`AT+QCFG="usbcfg"`, 8*time.Second)
+	if err != nil {
+		return usbConfig{}, "", err
+	}
+	config, err := parseUSBConfig(response)
+	if err != nil {
+		return usbConfig{}, "", err
+	}
+	return config, strings.TrimSpace(response), nil
+}
+
+func profileStatus(config usbConfig, raw string, needsReconnect bool, message string) usbProfileStatus {
+	mode := "mac"
+	if !config.uacEnabled() {
+		mode = "mobile"
+	}
+	return usbProfileStatus{Mode: mode, UACEnabled: config.uacEnabled(), Configuration: raw, NeedsReconnect: needsReconnect, Message: message}
+}
+
+type usbProfileIntent struct {
+	MobileArmed bool `json:"mobile_armed"`
+}
+
+func (a *app) loadUSBProfileIntentLocked() error {
+	if a.usbProfileIntentLoaded {
+		return nil
+	}
+	if a.usbProfileIntentPath == "" {
+		configDir, err := os.UserConfigDir()
+		if err != nil {
+			return err
+		}
+		a.usbProfileIntentPath = filepath.Join(configDir, "DJOneHub", "usb-profile-intent.json")
+	}
+	var intent usbProfileIntent
+	data, err := os.ReadFile(a.usbProfileIntentPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &intent); err != nil {
+			return err
+		}
+	}
+	a.usbProfileMobileArmed = intent.MobileArmed
+	a.usbProfileIntentLoaded = true
+	return nil
+}
+
+func (a *app) persistUSBProfileIntentLocked() error {
+	if err := a.loadUSBProfileIntentLocked(); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(a.usbProfileIntentPath), 0o700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(usbProfileIntent{MobileArmed: a.usbProfileMobileArmed}, "", "  ")
+	if err != nil {
+		return err
+	}
+	temporary := a.usbProfileIntentPath + ".tmp"
+	if err := os.WriteFile(temporary, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(temporary, a.usbProfileIntentPath)
+}
+
+func (a *app) usbProfile(w http.ResponseWriter, _ *http.Request) {
+	config, raw, err := a.readUSBProfile()
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, profileStatus(config, raw, false, ""))
+}
+
+// setUSBProfile changes only Quectel's documented UAC field. Mobile mode saves
+// the configuration without rebooting; unplugging to iPhone/iPad applies it.
+func (a *app) setUSBProfile(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Mode string `json:"mode"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(body.Mode))
+	if mode != "mobile" && mode != "mac" {
+		writeError(w, http.StatusBadRequest, "mode must be mobile or mac")
+		return
+	}
+	a.usbProfileMu.Lock()
+	defer a.usbProfileMu.Unlock()
+	config, raw, err := a.readUSBProfile()
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	wantUAC := mode == "mac"
+	if config.uacEnabled() == wantUAC {
+		a.usbProfileMobileArmed = mode == "mobile"
+		if err := a.persistUSBProfileIntentLocked(); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("保存连接模式意图失败: %v", err))
+			return
+		}
+		message := "当前已是 Mac 完整模式"
+		if mode == "mobile" {
+			message = "当前已是 iPhone/iPad 模式；拔插到移动设备后生效"
+		}
+		writeJSON(w, http.StatusOK, profileStatus(config, raw, false, message))
+		return
+	}
+	if mode == "mobile" {
+		if _, err := a.runATCommand("AT+QPCMV=0", 5*time.Second); err != nil {
+			writeError(w, http.StatusBadGateway, fmt.Sprintf("关闭当前语音流失败: %v", err))
+			return
+		}
+	}
+	if _, err := a.runATCommand(config.withUAC(wantUAC), 8*time.Second); err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("写入 USB 配置失败: %v", err))
+		return
+	}
+	updated := usbConfig{fields: append(append([]string(nil), config.fields[:8]...), map[bool]string{true: "1", false: "0"}[wantUAC])}
+	if mode == "mobile" {
+		a.usbProfileMobileArmed = true
+		if err := a.persistUSBProfileIntentLocked(); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("保存 iPhone/iPad 模式意图失败: %v", err))
+			return
+		}
+		writeJSON(w, http.StatusAccepted, profileStatus(updated, raw, true, "已保存 iPhone/iPad 模式；现在直接拔出并连接移动设备即可"))
+		return
+	}
+	a.usbProfileMobileArmed = false
+	if err := a.persistUSBProfileIntentLocked(); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("保存 Mac 模式意图失败: %v", err))
+		return
+	}
+	if _, err := a.runATCommand("AT+CFUN=1,1", 3*time.Second); err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("已写入 Mac 模式，但模块重启失败: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusAccepted, profileStatus(updated, raw, true, "已恢复 Mac 完整模式，模块正在重新连接"))
 }
 
 func parseUSBNetMode(resp string) string {

@@ -19,13 +19,52 @@ import (
 )
 
 const (
-	djiUSBVendorID  = 0x2ca3
-	djiUSBProductID = 0x4006
+	djiUSBVendorID      = 0x2ca3
+	djiUSBProductID     = 0x4006
+	quectelUSBVendorID  = 0x2c7c
+	quectelUSBProductID = 0x0125
 )
+
+// usbModuleIdentity enumerates the two USB identities used by the first-gen
+// DJI/QDC507 module. The Quectel identity is the documented UAC/ADB layout;
+// accepting both prevents the local controller from losing its modem after a
+// deliberate, verified USB composition recovery.
+type usbModuleIdentity struct {
+	vendorID  int
+	productID int
+}
+
+func (i usbModuleIdentity) String() string {
+	return fmt.Sprintf("%04x:%04x", i.vendorID, i.productID)
+}
+
+var supportedUSBModuleIdentities = []usbModuleIdentity{
+	{vendorID: djiUSBVendorID, productID: djiUSBProductID},
+	{vendorID: quectelUSBVendorID, productID: quectelUSBProductID},
+}
+
+func isSupportedUSBModuleIdentity(vendorID, productID int) bool {
+	for _, candidate := range supportedUSBModuleIdentities {
+		if candidate.vendorID == vendorID && candidate.productID == productID {
+			return true
+		}
+	}
+	return false
+}
+
+func openSupportedUSBModuleDevice(ctx *C.libusb_context) (*C.libusb_device_handle, usbModuleIdentity) {
+	for _, identity := range supportedUSBModuleIdentities {
+		if handle := C.libusb_open_device_with_vid_pid(ctx, C.uint16_t(identity.vendorID), C.uint16_t(identity.productID)); handle != nil {
+			return handle, identity
+		}
+	}
+	return nil, usbModuleIdentity{}
+}
 
 type usbAT struct {
 	ctx         *C.libusb_context
 	handle      *C.libusb_device_handle
+	identity    usbModuleIdentity
 	iface       int
 	endpointIn  byte
 	endpointOut byte
@@ -43,10 +82,10 @@ func openDJIUSBAT() (*usbAT, error) {
 	if rc := C.libusb_init(&ctx); rc != 0 {
 		return nil, fmt.Errorf("libusb init: %s", usbErrorName(rc))
 	}
-	handle := C.libusb_open_device_with_vid_pid(ctx, djiUSBVendorID, djiUSBProductID)
+	handle, identity := openSupportedUSBModuleDevice(ctx)
 	if handle == nil {
 		C.libusb_exit(ctx)
-		return nil, errors.New("DJI USB AT device 2ca3:4006 not found")
+		return nil, errors.New("DJI/Quectel USB AT device (2ca3:4006 or 2c7c:0125) not found")
 	}
 	candidates, err := usbATCandidates(handle)
 	if err != nil {
@@ -63,6 +102,7 @@ func openDJIUSBAT() (*usbAT, error) {
 		dev := &usbAT{
 			ctx:         ctx,
 			handle:      handle,
+			identity:    identity,
 			iface:       candidate.iface,
 			endpointIn:  candidate.endpointIn,
 			endpointOut: candidate.endpointOut,
@@ -295,8 +335,8 @@ func (u *usbAT) Description() string {
 	if u == nil {
 		return "USB AT"
 	}
-	return fmt.Sprintf("USB AT · 2ca3:4006 interface %d out 0x%02x in 0x%02x",
-		u.iface, u.endpointOut, u.endpointIn)
+	return fmt.Sprintf("USB AT · %s interface %d out 0x%02x in 0x%02x",
+		u.identity.String(), u.iface, u.endpointOut, u.endpointIn)
 }
 
 func (u *usbAT) bulkWriteLocked(endpoint byte, payload []byte, timeout time.Duration) error {
@@ -341,18 +381,6 @@ func (u *usbAT) bulkReadLocked(endpoint byte, timeout time.Duration) ([]byte, er
 
 func usbErrorName(rc C.int) string {
 	return C.GoString(C.libusb_error_name(rc))
-}
-
-func atResponseComplete(resp string) bool {
-	normalized := strings.ReplaceAll(resp, "\r\n", "\n")
-	return strings.Contains(normalized, "\nOK\n") ||
-		strings.HasSuffix(normalized, "\nOK") ||
-		atResponseIsError(normalized)
-}
-
-func atResponseHasPrompt(resp string) bool {
-	trimmed := strings.TrimRight(resp, " \t\r\n")
-	return strings.HasSuffix(trimmed, ">")
 }
 
 func normalizeATResponse(resp string) string {

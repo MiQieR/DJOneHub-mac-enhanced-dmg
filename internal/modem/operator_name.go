@@ -1,6 +1,9 @@
 package modem
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 var servingOperatorNameByPLMN = map[string]string{
 	// 中国大陆
@@ -68,4 +71,58 @@ func ResolveServingOperatorNameFromPLMN(plmn string) string {
 		return name
 	}
 	return plmn
+}
+
+// operatorDisplayNameByCode 常见模块上报的英文运营商名/代码 → 中文显示名，
+// 与网页端 app.js 的映射保持一致。
+var operatorDisplayNameByCode = map[string]string{
+	"CHN-UNICOM":     "中国联通",
+	"CHINA UNICOM":   "中国联通",
+	"UNICOM":         "中国联通",
+	"CHINA MOBILE":   "中国移动",
+	"CMCC":           "中国移动",
+	"CHN-CMCC":       "中国移动",
+	"CHINA TELECOM":  "中国电信",
+	"CHN-CT":         "中国电信",
+	"CTCC":           "中国电信",
+	"CBN":            "中国广电",
+	"CHN-CBN":        "中国广电",
+	"CHINA BROADNET": "中国广电",
+}
+
+// plmnCandidatesFromIMSI 从 IMSI 提取候选 PLMN（MCC+MNC，兼容 2 位或 3 位 MNC）。
+func plmnCandidatesFromIMSI(imsi string) []string {
+	digits := strings.TrimSpace(imsi)
+	if len(digits) < 5 {
+		return nil
+	}
+	candidates := make([]string, 0, 2)
+	if len(digits) >= 6 {
+		if _, err := strconv.Atoi(digits[:6]); err == nil {
+			candidates = append(candidates, digits[:6])
+		}
+	}
+	if _, err := strconv.Atoi(digits[:5]); err == nil {
+		candidates = append(candidates, digits[:5])
+	}
+	return candidates
+}
+
+// NormalizeServingOperatorName 把模块上报的运营商名称/代码规范化为中文显示名：
+// 先按英文名/代码映射，再用 IMSI 的 PLMN 查表；仍无法识别时原样返回。
+func NormalizeServingOperatorName(raw, imsi string) string {
+	name := strings.TrimSpace(raw)
+	key := strings.ToUpper(name)
+	if display, ok := operatorDisplayNameByCode[key]; ok {
+		return display
+	}
+	if display, found := LookupServingOperatorNameFromPLMN(name); found {
+		return display
+	}
+	for _, plmn := range plmnCandidatesFromIMSI(imsi) {
+		if display, found := LookupServingOperatorNameFromPLMN(plmn); found {
+			return display
+		}
+	}
+	return name
 }

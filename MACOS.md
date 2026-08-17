@@ -11,7 +11,7 @@ EG25-G. It does not require UTM for AT-mode management.
 - Execute explicit AT commands
 - Read and switch physical eUICC profiles through AT APDU transport
 - Local management page at `http://127.0.0.1:7575`
-- Packaged Apple Silicon release (Intel packaging is planned separately)
+- Packaged Universal release containing Apple Silicon and Intel binaries
 
 The cellular data interface remains managed by macOS. This allows macOS to use
 the dongle as its network connection while DJOneHub uses a separate USB serial
@@ -19,17 +19,20 @@ interface for management.
 
 ## Downloaded release
 
-DJOneHub is distributed as a standard macOS Disk Image (`.dmg`).
+The Universal DMG contains the backend, SwiftUI App, libusb runtime, licenses,
+installer and uninstaller. It does not require Go, Homebrew or a separately
+installed libusb on the user's Mac.
 
-1. Open `DJOneHub-macOS-universal-v0.1.3-preview.dmg`.
-2. Drag `DJOneHub.app` into `/Applications`.
-3. Open `DJOneHub` from Applications or Launchpad.
+From the extracted release directory:
 
-The launcher app will run in the menu bar:
-- **Left click**: Opens `http://127.0.0.1:7575` in your browser.
-- **Right click**: Context menu to open web interface, toggle auto-launch at login, or quit application.
+```sh
+./djonehub start
+```
 
-Logs are stored in `~/Library/Application Support/DJOneHub/logs/`.
+The terminal remains attached to the service and the management page opens
+automatically. Press `Control+C` to stop it, or run `./djonehub stop` from another
+terminal in the same directory. Logs are stored in
+`~/Library/Logs/DJOneHub/djonehub.log`.
 
 ## Build from source
 
@@ -37,24 +40,58 @@ Requirements:
 
 - macOS 13 or newer
 - Go 1.26 or newer
-- Xcode / Command Line Tools
-
-Build DMG release (Universal binary arm64 + x86_64):
 
 ```sh
-./scripts/build-dmg-universal.sh v0.1.3-preview
+./scripts/build-dmg-universal.sh v1.0.0-rc1
 ```
 
 Release outputs:
 
-- `dist/DJOneHub.app`
-- `dist/DJOneHub-macOS-universal-v0.1.3-preview.dmg`
+- `dist/DJOneHub-macOS-universal-v1.0.0-rc1.dmg`
+- `dist/DJOneHub-macOS-universal-v1.0.0-rc1.dmg.sha256`
 
-Build App Bundle directly:
+The packaging script downloads the official libusb source archive, verifies its
+SHA-256, builds it for macOS 13 or newer and bundles the resulting runtime.
+
+## Run
+
+Connect the modem and run:
 
 ```sh
-./scripts/create-app-bundle.sh v0.1.3-preview universal
+./dist/djonehub-macos
 ```
+
+If automatic discovery picks no AT port, inspect `/dev/cu.*` and pass it:
+
+```sh
+./dist/djonehub-macos -port /dev/cu.usbmodemXXXX
+```
+
+The server only listens on localhost by default. Open:
+
+```text
+http://127.0.0.1:7575
+```
+
+## Demo without hardware
+
+To explore the management page before buying the module, run:
+
+```sh
+./dist/djonehub-macos -demo
+```
+
+Then open `http://127.0.0.1:7575`. Demo mode provides simulated modem status,
+SMS messages, AT command responses and eSIM profiles. It does not access a real
+SIM, send messages or switch a physical eSIM profile.
+
+## Launch at login
+
+```sh
+./scripts/install-macos.sh
+```
+
+Logs are written to `~/Library/Logs/DJOneHub`.
 
 ## Platform limitations
 

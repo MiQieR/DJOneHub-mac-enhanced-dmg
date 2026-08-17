@@ -39,4 +39,4 @@ dist/DJOneHubNotifier.app/Contents/MacOS/DJOneHubNotifier --preview sms
 ~/Library/Application Support/DJOneHub/notifier/DJOneHubNotifier.app
 ```
 
-将 `com.jamie.djonehub-notifier.plist` 复制到 `~/Library/LaunchAgents/` 后，通过 `launchctl bootstrap` 注册。助手要求 DJOneHub 继续监听 `http://127.0.0.1:7575/`。
+发行包的安装脚本会按当前 macOS 用户目录生成 LaunchAgent，再通过 `launchctl bootstrap` 注册。助手要求 DJOneHub 继续监听 `http://127.0.0.1:7575/`。

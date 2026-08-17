@@ -29,6 +29,15 @@ func TestParseCLCCIgnoresDataSession(t *testing.T) {
 	}
 }
 
+func TestValidateCallATResponseRejectsModemError(t *testing.T) {
+	if err := validateCallATResponse("ATD10086;\r\nERROR"); err == nil {
+		t.Fatal("validateCallATResponse accepted ERROR reply")
+	}
+	if err := validateCallATResponse("ATD10086;\r\nOK"); err != nil {
+		t.Fatalf("validateCallATResponse rejected OK reply: %v", err)
+	}
+}
+
 func TestCallLifecycleMarksMissed(t *testing.T) {
 	a := &app{callPollInterval: 3 * time.Second, callNotifier: func(callRecord) {}}
 	started := time.Date(2026, 7, 26, 10, 0, 0, 0, time.Local)
@@ -58,5 +67,24 @@ func TestAnsweredCallIsNotMissed(t *testing.T) {
 
 	if len(a.callHistory) != 1 || a.callHistory[0].Missed {
 		t.Fatalf("history=%+v, want answered call", a.callHistory)
+	}
+}
+
+func TestNormalizeDialNumber(t *testing.T) {
+	cases := map[string]string{
+		"13800138000":        "13800138000",
+		"+86 138-0013(8000)": "+8613800138000",
+		"10086":              "10086",
+		"*100#":              "*100#",
+		"":                   "",
+		"   ":                "",
+		"12a45":              "",
+		"tel:+8613800138000": "",
+		"1-800-FLOWERS":      "",
+	}
+	for input, want := range cases {
+		if got := normalizeDialNumber(input); got != want {
+			t.Fatalf("normalizeDialNumber(%q)=%q, want %q", input, got, want)
+		}
 	}
 }

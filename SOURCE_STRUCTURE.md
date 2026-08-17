@@ -26,8 +26,10 @@ DJOneHub-source-minimal/
 │   ├── README.md             # 发行包内的安装说明
 │   └── THIRD_PARTY_NOTICES.md
 ├── scripts/
-│   ├── build-macos.sh        # 本地开发构建
-│   └── package-macos-arm64.sh# Apple Silicon 发行包构建
+│   ├── build-macos.sh             # 本地开发构建
+│   ├── package-macos-universal.sh # macOS Universal 目录包
+│   ├── build-dmg-universal.sh     # macOS Universal DMG
+│   └── package-windows-amd64.sh   # Windows amd64 ZIP
 ├── third_party/              # 当前构建实际使用的本地第三方源码
 ├── go.mod
 ├── go.sum
@@ -66,10 +68,11 @@ Go 以“包”为编译边界。macOS 主程序虽然集中在 `cmd/djonehub-ma
 go test -mod=mod ./...
 ```
 
-生成 Apple Silicon 发行包：
+生成私有候选发行包：
 
 ```sh
-./scripts/package-macos-arm64.sh v0.1.0-preview
+./scripts/build-dmg-universal.sh v1.0.0-rc1
+./scripts/package-windows-amd64.sh v1.0.0-rc1
 ```
 
 构建脚本会从 libusb 官方 Release 下载源码、核对 SHA-256，并将编译后的动态库与 DJOneHub 一起打包。

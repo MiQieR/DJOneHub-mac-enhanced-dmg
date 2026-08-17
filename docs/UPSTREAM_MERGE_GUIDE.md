@@ -201,5 +201,6 @@ git push origin main
 | **v0.1.3** | `12c033f` | `0adfa8c` | **【核心改造】** 实现标准 macOS .app 架构、Swift 状态栏启动器、开机自启开关、拖拽 DMG 安装。 |
 | **v0.1.5** | `af9bd04` | `9644f17` | 合并上游：4G DHCP 自动续租、启动时 DHCP 修复、Windows 实验版支持。 |
 | **v0.1.7** | `9b566f8` | `0bae842` | 合并上游：蜂窝信号自检与自动找回、USB 打开超时保护、自动创建/启用 4G 网卡服务。 |
+| **v1.2.9** | *(本次)* | `256a719` | **【重大架构升级】** 合并上游 v1.2.4-v1.2.9：通话、短信增强、通讯录、iPhone/iPad 模式、动态状态栏图标、语音运行时。方案 A：废弃 DJOneHubLauncher，DJOneHubNotifier 升级为主 App，删除 `ensureModuleServices()` LaunchAgent 机制（待机耗电根因），新增 ProcessManager.swift 直接管理 Go 后端进程，开机自启改为 SMAppService，图标更新为新版。 |
 
 > *下次执行合并时，请将上表作为参考，并在完成合并后在本文档底部追加新的合并记录。*

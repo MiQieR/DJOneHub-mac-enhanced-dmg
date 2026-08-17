@@ -1,5 +1,6 @@
 const $ = (selector) => document.querySelector(selector);
 let lastSMSCount = null;
+let selectedSMSSender = null;
 let esimHealthPollTimer = null;
 let esimHealthInFlight = false;
 let networkTrafficTimer = null;
@@ -10,6 +11,13 @@ let lastActiveCallID = null;
 let cellularPolicyBusy = false;
 let gpsRefreshTimer = null;
 let gpsRefreshInFlight = false;
+let platformCapabilities = {
+  os: "darwin",
+  call_audio: true,
+  direct_usb_at: true,
+  esim_full: true,
+  network_policy_native: true,
+};
 
 function setThemePreference(theme) {
   if (theme === "light" || theme === "dark") {
@@ -67,6 +75,34 @@ async function api(path, options = {}) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
+}
+
+async function loadPlatform() {
+  try {
+    platformCapabilities = await api("/api/platform");
+  } catch (_) {
+    return;
+  }
+  if (platformCapabilities.os !== "windows") return;
+
+  document.title = "DJOneHub for Windows";
+  const platformLabel = document.querySelector(".app-header h1 span");
+  if (platformLabel) platformLabel.textContent = "Windows";
+
+  if (!platformCapabilities.call_audio) {
+    const audioRow = document.querySelector(".audio-row");
+    if (audioRow) audioRow.hidden = true;
+  }
+  if (!platformCapabilities.esim_full) {
+    const esimNav = document.querySelector('[data-view="esim"]');
+    const esimView = document.querySelector("#esim");
+    if (esimNav) esimNav.hidden = true;
+    if (esimView) esimView.hidden = true;
+  }
+  if (!platformCapabilities.network_policy_native) {
+    const policy = document.querySelector("#cellular-policy-toggle")?.closest(".network-policy-control");
+    if (policy) policy.hidden = true;
+  }
 }
 
 function renderCellularPolicy(state) {
@@ -283,8 +319,139 @@ async function loadStatus() {
   }
 }
 
+function smsShortTime(timestamp) {
+  const date = new Date(timestamp);
+  const now = new Date();
+  if (date.toDateString() === now.toDateString()) {
+    return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  }
+  return date.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
+}
+
+function groupSMSCConversations(messages) {
+  const groups = new Map();
+  for (const message of messages) {
+    const key = message.sender || "未知号码";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(message);
+  }
+  return [...groups.entries()].map(([sender, items]) => ({
+    sender,
+    items,
+    last: items[0],
+  }));
+}
+
+function renderSMSThread(messages, sender) {
+  const thread = $("#sms-thread");
+  thread.replaceChildren();
+  const head = document.createElement("div");
+  head.className = "thread-head";
+  const name = document.createElement("strong");
+  name.textContent = sender;
+  const meta = document.createElement("small");
+  meta.textContent = `${messages.length} 条短信`;
+  head.append(name, meta);
+
+  const list = document.createElement("div");
+  list.className = "thread-list";
+  [...messages].reverse().forEach((message) => {
+    const bubble = document.createElement("div");
+    bubble.className = "thread-msg received";
+    const content = document.createElement("span");
+    content.textContent = message.content;
+    bubble.append(content);
+    if (message.code) {
+      const actions = document.createElement("span");
+      actions.className = "sms-actions";
+      const badge = document.createElement("span");
+      badge.className = "code-badge";
+      badge.textContent = `验证码 ${message.code}`;
+      const copy = document.createElement("button");
+      copy.className = "secondary compact";
+      copy.type = "button";
+      copy.textContent = "复制";
+      copy.addEventListener("click", () => copySMSCode(message.code));
+      actions.append(badge, copy);
+      bubble.append(actions);
+    }
+    const time = document.createElement("time");
+    time.textContent = new Date(message.timestamp).toLocaleString("zh-CN");
+    bubble.append(time);
+    list.append(bubble);
+  });
+
+  const reply = document.createElement("form");
+  reply.className = "thread-reply";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "回复短信…";
+  input.maxLength = 1000;
+  const button = document.createElement("button");
+  button.type = "submit";
+  button.textContent = "发送";
+  reply.append(input, button);
+  reply.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const content = input.value.trim();
+    if (!content) return;
+    button.disabled = true;
+    try {
+      const result = await api("/api/sms/send", {
+        method: "POST",
+        body: JSON.stringify({ phone: sender, message: content }),
+      });
+      notice(`已发送（${result.segments || 1} 条）`);
+      input.value = "";
+      await loadSMS();
+    } catch (error) {
+      notice(`发送失败：${error.message}`);
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  thread.append(head, list, reply);
+}
+
+function renderSMSCConversations(conversations) {
+  const container = $("#sms-conversations");
+  if (!conversations.length) {
+    container.className = "conversation-list empty";
+    container.textContent = "暂无短信";
+    $("#sms-thread").replaceChildren();
+    return;
+  }
+  const selected = selectedSMSSender && conversations.some((c) => c.sender === selectedSMSSender)
+    ? selectedSMSSender
+    : conversations[0].sender;
+  selectedSMSSender = selected;
+  container.className = "conversation-list";
+  container.replaceChildren(...conversations.map((conv) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `conversation-item${conv.sender === selected ? " active" : ""}`;
+    const name = document.createElement("strong");
+    name.textContent = conv.sender;
+    const time = document.createElement("time");
+    time.className = "conversation-time";
+    time.textContent = smsShortTime(conv.last.timestamp);
+    const snippet = document.createElement("span");
+    snippet.className = "conversation-snippet";
+    snippet.textContent = conv.last.content;
+    button.append(name, time, snippet);
+    button.addEventListener("click", () => {
+      selectedSMSSender = conv.sender;
+      renderSMSCConversations(conversations);
+      renderSMSThread(conv.items, conv.sender);
+    });
+    return button;
+  }));
+  const current = conversations.find((c) => c.sender === selected);
+  if (current) renderSMSThread(current.items, current.sender);
+}
+
 async function loadSMS() {
-  const list = $("#sms-list");
   try {
     const [messages, status] = await Promise.all([
       api("/api/sms"),
@@ -300,39 +467,7 @@ async function loadSMS() {
       notice(`收到 ${messages.length - lastSMSCount} 条新短信`);
     }
     lastSMSCount = messages.length;
-    if (!messages.length) {
-      list.className = "list empty";
-      list.textContent = "暂无短信";
-      return;
-    }
-    list.className = "list";
-    list.replaceChildren(...messages.map((message) => {
-      const row = document.createElement("article");
-      row.className = "item";
-      const sender = document.createElement("strong");
-      sender.textContent = message.sender || "未知号码";
-      const content = document.createElement("p");
-      content.textContent = message.content;
-      const time = document.createElement("time");
-      time.textContent = new Date(message.timestamp).toLocaleString();
-      if (message.code) {
-        const actions = document.createElement("div");
-        actions.className = "sms-actions";
-        const badge = document.createElement("span");
-        badge.className = "code-badge";
-        badge.textContent = `验证码 ${message.code}`;
-        const copy = document.createElement("button");
-        copy.className = "secondary compact";
-        copy.type = "button";
-        copy.textContent = "复制";
-        copy.addEventListener("click", () => copySMSCode(message.code));
-        actions.append(badge, copy, time);
-        row.append(sender, content, actions);
-      } else {
-        row.append(sender, content, time);
-      }
-      return row;
-    }));
+    renderSMSCConversations(groupSMSCConversations(messages));
   } catch (error) {
     $("#sms-status").textContent = `读取列表失败：${error.message}`;
     notice(error.message);
@@ -351,6 +486,14 @@ function callStateLabel(call) {
   }
 }
 
+function formatCallDuration(call) {
+  if (!call.ended_at) return "进行中";
+  const seconds = Math.max(0, Math.round((new Date(call.ended_at) - new Date(call.started_at)) / 1000));
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
 function renderCallHistory(history) {
   const list = $("#call-history");
   const rows = Array.isArray(history) ? history : [];
@@ -364,13 +507,37 @@ function renderCallHistory(history) {
   list.replaceChildren(...rows.map((call) => {
     const row = document.createElement("article");
     row.className = "item call-history-item";
+    const nameWrap = document.createElement("div");
+    nameWrap.style.display = "flex";
+    nameWrap.style.alignItems = "center";
+    nameWrap.style.gap = "8px";
+    const direction = document.createElement("span");
+    direction.className = "call-dir";
+    direction.textContent = call.missed ? "!" : (call.direction === "outgoing" ? "↑" : "↓");
+    direction.title = call.missed ? "未接来电" : (call.direction === "outgoing" ? "已拨出" : "已接听");
     const number = document.createElement("strong");
     number.textContent = call.number || "未知号码";
+    nameWrap.append(direction, number);
     const state = document.createElement("p");
-    state.textContent = call.missed ? "未接来电" : "通话结束";
-    const time = document.createElement("time");
-    time.textContent = new Date(call.started_at).toLocaleString();
-    row.append(number, state, time);
+    state.textContent = call.missed ? "未接来电" : (call.direction === "outgoing" ? "已拨出" : "已接听");
+    const right = document.createElement("div");
+    right.className = "sms-actions";
+    right.style.flexDirection = "column";
+    right.style.alignItems = "flex-end";
+    const meta = document.createElement("time");
+    meta.textContent = `${new Date(call.started_at).toLocaleString()} · ${formatCallDuration(call)}`;
+    const callBack = document.createElement("button");
+    callBack.className = "secondary compact";
+    callBack.type = "button";
+    callBack.textContent = "回拨";
+    callBack.addEventListener("click", () => {
+      if (call.number) {
+        $("#dial-number").value = call.number;
+        $("#dial-form").requestSubmit();
+      }
+    });
+    right.append(meta, callBack);
+    row.append(nameWrap, state, right);
     return row;
   }));
 }
@@ -394,7 +561,11 @@ async function loadCalls() {
       $("#active-call-label").textContent = callStateLabel(active);
       $("#active-call-number").textContent = active.number || "未知号码";
       $("#active-call-time").textContent = new Date(active.started_at).toLocaleString();
-      $("#reject-call").hidden = !["incoming", "waiting", "active"].includes(active.state);
+      const ringing = ["incoming", "waiting"].includes(active.state);
+      const inCall = ["active", "dialing", "alerting", "held"].includes(active.state);
+      $("#answer-call").hidden = !ringing;
+      $("#reject-call").hidden = !ringing;
+      $("#hangup-call").hidden = !(ringing || inCall);
       if (active.id !== lastActiveCallID &&
           active.direction === "incoming" &&
           ["incoming", "waiting"].includes(active.state)) {
@@ -404,6 +575,18 @@ async function loadCalls() {
     } else {
       panel.hidden = true;
       lastActiveCallID = null;
+    }
+    const audio = status.audio || {};
+    $("#call-audio-status").textContent = audio.running
+      ? "通话音频：运行中"
+      : "通话音频：未运行";
+    $("#call-audio-toggle").textContent = audio.running ? "关闭" : "开启";
+    $("#call-audio-mute").disabled = !audio.running;
+    $("#call-audio-levels").textContent = audio.running
+      ? `模块音量 ${Math.round((audio.far_peak || 0) * 100)}% · 麦克风 ${Math.round((audio.near_peak || 0) * 100)}%`
+      : "";
+    if (audio.error) {
+      $("#call-audio-status").textContent += `（${audio.error}）`;
     }
     renderCallHistory(status.history);
   } catch (error) {
@@ -1106,9 +1289,9 @@ async function loadESIM() {
   }
 }
 
-document.querySelectorAll(".tab").forEach((tab) => {
+document.querySelectorAll(".sidebar-item, .tab").forEach((tab) => {
   tab.addEventListener("click", () => {
-    document.querySelectorAll(".tab, .view").forEach((el) => el.classList.remove("active"));
+    document.querySelectorAll(".sidebar-item, .tab, .view").forEach((el) => el.classList.remove("active"));
     tab.classList.add("active");
     $(`#${tab.dataset.view}`).classList.add("active");
     if (tab.dataset.view === "esim") loadESIM();
@@ -1121,6 +1304,23 @@ document.querySelectorAll(".tab").forEach((tab) => {
       setGPSPolling(false);
     }
   });
+});
+
+$("#dial-pad").addEventListener("click", (event) => {
+  const key = event.target.closest(".dial-key");
+  if (!key) return;
+  const input = $("#dial-number");
+  const action = key.dataset.action;
+  if (action === "backspace") {
+    input.value = input.value.slice(0, -1);
+  } else if (action === "clear") {
+    input.value = "";
+  } else if (action === "call") {
+    $("#dial-form").requestSubmit();
+  } else if (key.dataset.key) {
+    input.value += key.dataset.key;
+  }
+  input.focus();
 });
 
 $("#esim-download-form").addEventListener("submit", async (event) => {
@@ -1205,22 +1405,22 @@ $("#refresh-sms").addEventListener("click", async () => {
 });
 $("#clear-module-sms").addEventListener("click", async () => {
   const confirmed = await showModal({
-    title: "清空模块旧短信",
-    message: "只会清空模块内部 ME 存储里的旧短信，不会删除 SIM 卡短信。",
+    title: "清空全部短信",
+    message: "将删除 SIM 卡和模块存储中的全部短信，且无法恢复。",
     confirmLabel: "确认清空",
     danger: true,
   });
   if (!confirmed) return;
   const button = $("#clear-module-sms");
   button.disabled = true;
-  $("#sms-status").textContent = "正在清空模块内部旧短信...";
+  $("#sms-status").textContent = "正在清空 SIM 与模块短信...";
   try {
     const result = await api("/api/sms/clear-module", { method: "POST" });
-    $("#sms-status").textContent = `模块旧短信已清理：${result.before ?? 0} -> ${result.after ?? 0} 条`;
+    $("#sms-status").textContent = `短信已清理：${result.before ?? 0} -> ${result.after ?? 0} 条`;
     await loadSMS();
-    notice("模块旧短信已清理");
+    notice("短信已清理");
   } catch (error) {
-    $("#sms-status").textContent = `清理模块旧短信失败：${error.message}`;
+    $("#sms-status").textContent = `清理短信失败：${error.message}`;
     notice(error.message);
   } finally {
     button.disabled = false;
@@ -1262,7 +1462,84 @@ $("#reject-call").addEventListener("click", async () => {
     button.disabled = false;
   }
 });
+$("#answer-call").addEventListener("click", async () => {
+  const button = $("#answer-call");
+  button.disabled = true;
+  try {
+    await api("/api/calls/answer", { method: "POST" });
+    notice(platformCapabilities.call_audio ? "已接听，通话音频已启用" : "已接听；Windows 通话音频尚未启用");
+    await loadCalls();
+  } catch (error) {
+    notice(`接听失败：${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+});
+$("#hangup-call").addEventListener("click", async () => {
+  const button = $("#hangup-call");
+  button.disabled = true;
+  try {
+    await api("/api/calls/hangup", { method: "POST" });
+    notice("已挂断");
+    await loadCalls();
+  } catch (error) {
+    notice(`挂断失败：${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+});
+$("#dial-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const number = $("#dial-number").value.trim();
+  if (!number) return;
+  const button = event.target.querySelector("button");
+  button.disabled = true;
+  try {
+    await api("/api/calls/dial", { method: "POST", body: JSON.stringify({ number }) });
+    notice(platformCapabilities.call_audio
+      ? `正在拨打 ${number}，通话音频已启用`
+      : `正在拨打 ${number}；Windows 通话音频尚未启用`);
+    $("#dial-number").value = "";
+    await loadCalls();
+  } catch (error) {
+    notice(`拨号失败：${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+});
+$("#call-audio-toggle").addEventListener("click", async () => {
+  const button = $("#call-audio-toggle");
+  button.disabled = true;
+  try {
+    const running = button.textContent === "关闭";
+    await api(running ? "/api/calls/audio/stop" : "/api/calls/audio/start", { method: "POST" });
+    notice(running ? "通话音频已关闭" : "通话音频已开启");
+    await loadCalls();
+  } catch (error) {
+    notice(`音频切换失败：${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+});
+$("#call-audio-mute").addEventListener("click", async () => {
+  const button = $("#call-audio-mute");
+  const muted = button.textContent === "取消静音";
+  button.disabled = true;
+  try {
+    await api("/api/calls/audio/mute", {
+      method: "POST",
+      body: JSON.stringify({ muted: !muted }),
+    });
+    button.textContent = muted ? "静音" : "取消静音";
+    notice(muted ? "已取消静音" : "已静音（对方听不到你的声音）");
+  } catch (error) {
+    notice(`静音切换失败：${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+});
 
+loadPlatform();
 loadStatus();
 loadSMS();
 loadCalls();

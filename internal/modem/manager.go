@@ -959,7 +959,7 @@ func (m *Manager) collectDeviceInfo() {
 		m.imsi = imsi
 	}
 	if operator != "" {
-		m.operator = operator
+		m.operator = NormalizeServingOperatorName(operator, imsi)
 	}
 	m.simInserted = simInserted
 	if signalDBM != -999 {
@@ -1195,7 +1195,7 @@ func (m *Manager) RefreshStatus(onAlert func(msg string), onRecover func(msg str
 	defer m.infoMu.Unlock()
 
 	if operator != "" {
-		m.operator = operator
+		m.operator = NormalizeServingOperatorName(operator, m.imsi)
 	}
 	if signalDBM != -999 {
 		m.signalDBM = signalDBM

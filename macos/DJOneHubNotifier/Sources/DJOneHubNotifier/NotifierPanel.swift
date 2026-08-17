@@ -4,8 +4,11 @@ import SwiftUI
 @MainActor
 final class NotifierPanel {
     private let panel: NSPanel
-    private var hostingView: NSHostingView<NotifierView>?
+    private var hostingView: NSHostingView<AnyView>?
+    var contactStore: ContactStore?
+    var appSettings: AppSettings?
     private var autoHideWorkItem: DispatchWorkItem?
+    private var lastMeasuredSize: CGSize?
 
     init() {
         panel = NSPanel(
@@ -16,7 +19,9 @@ final class NotifierPanel {
         )
         panel.level = .floating
         panel.isOpaque = false
-        panel.backgroundColor = .clear
+        // macOS 26 对全透明窗口有渲染 bug，用接近不透明的 alpha 规避，
+        // 视觉上仍保持透明圆角浮层效果（内容自带圆角与材质背景）。
+        panel.backgroundColor = .white.withAlphaComponent(0.000001)
         panel.hasShadow = false
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
@@ -26,25 +31,55 @@ final class NotifierPanel {
     func show(
         _ content: PanelContent,
         onReject: @escaping () -> Void,
+        onAnswer: @escaping () -> Void,
         onOpen: @escaping () -> Void
     ) {
         autoHideWorkItem?.cancel()
-        let size: NSSize
+        lastMeasuredSize = nil
+        // 探测尺寸：给出最大宽度与充足高度，让 SwiftUI 按内容实际排版后再收敛到测量值。
+        let probe: NSSize
         switch content {
         case .incoming:
-            size = NSSize(width: 286, height: 138)
+            probe = NSSize(width: 320, height: 240)
         case .sms:
-            size = NSSize(width: 286, height: 60)
+            probe = NSSize(width: 286, height: 60)
         case .missed, .error:
-            size = NSSize(width: 286, height: 76)
+            probe = NSSize(width: 286, height: 76)
         case .idle:
-            size = NSSize(width: 286, height: 60)
+            probe = NSSize(width: 286, height: 60)
         }
-        panel.setContentSize(size)
-        hostingView = NSHostingView(
-            rootView: NotifierView(content: content, onReject: onReject, onOpen: onOpen)
+        let store = contactStore ?? ContactStore()
+        // 弹窗外观跟随 App 的「外观」设置（浅色/深色/跟随系统），避免始终深色
+        let root = AnyView(
+            NotifierView(
+                content: content,
+                onReject: onReject,
+                onAnswer: onAnswer,
+                onOpen: onOpen,
+                onSizeChange: { [weak self] size in
+                    self?.applyMeasuredSize(size)
+                }
+            )
+            .environmentObject(store)
+            .preferredColorScheme(appSettings?.appearance.colorScheme)
         )
+        switch appSettings?.appearance {
+        case .light:
+            panel.appearance = NSAppearance(named: .aqua)
+        case .dark:
+            panel.appearance = NSAppearance(named: .darkAqua)
+        default:
+            panel.appearance = nil
+        }
+        let hostingView = NSHostingView(rootView: root)
+        hostingView.frame = NSRect(origin: .zero, size: probe)
+        hostingView.layoutSubtreeIfNeeded()
+        self.hostingView = hostingView
         panel.contentView = hostingView
+        let size = lastMeasuredSize.map {
+            NSSize(width: ceil($0.width), height: ceil($0.height))
+        } ?? probe
+        panel.setContentSize(size)
         position(size: size)
         panel.orderFrontRegardless()
 
@@ -55,6 +90,16 @@ final class NotifierPanel {
             autoHideWorkItem = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: work)
         }
+    }
+
+    /// 用 SwiftUI 实际排版出的内容尺寸收敛弹窗大小，去掉固定高度留下的留白。
+    private func applyMeasuredSize(_ size: CGSize) {
+        guard size.width >= 40, size.height >= 24 else { return }
+        let rounded = NSSize(width: ceil(size.width), height: ceil(size.height))
+        lastMeasuredSize = rounded
+        guard rounded != panel.frame.size else { return }
+        panel.setContentSize(rounded)
+        position(size: rounded)
     }
 
     func hide() {

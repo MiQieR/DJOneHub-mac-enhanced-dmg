@@ -2,6 +2,18 @@ package main
 
 import "strings"
 
+func atResponseComplete(resp string) bool {
+	normalized := strings.ReplaceAll(resp, "\r\n", "\n")
+	return strings.Contains(normalized, "\nOK\n") ||
+		strings.HasSuffix(normalized, "\nOK") ||
+		atResponseIsError(normalized)
+}
+
+func atResponseHasPrompt(resp string) bool {
+	trimmed := strings.TrimRight(resp, " \t\r\n")
+	return strings.HasSuffix(trimmed, ">")
+}
+
 func atResponseIsError(resp string) bool {
 	normalized := strings.ToUpper(strings.ReplaceAll(resp, "\r\n", "\n"))
 	return strings.Contains(normalized, "\nERROR\n") ||

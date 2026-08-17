@@ -9,6 +9,20 @@ import (
 
 type usbAT struct{}
 
+const (
+	djiUSBVendorID      = 0x2ca3
+	djiUSBProductID     = 0x4006
+	quectelUSBVendorID  = 0x2c7c
+	quectelUSBProductID = 0x0125
+)
+
+// Keep non-macOS builds able to identify a supported module in status and
+// setup code, while deliberately leaving USB transport unavailable.
+func isSupportedUSBModuleIdentity(vendorID, productID int) bool {
+	return (vendorID == djiUSBVendorID && productID == djiUSBProductID) ||
+		(vendorID == quectelUSBVendorID && productID == quectelUSBProductID)
+}
+
 func openDJIUSBAT() (*usbAT, error) {
 	return nil, errors.New("USB AT requires macOS cgo build with libusb")
 }
